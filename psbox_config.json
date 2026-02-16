@@ -1,0 +1,13 @@
+{
+  "games": [],
+  "settings": {
+    "controlMode": "gamepad",
+    "theme": "ps4",
+    "language": "es"
+  },
+  "windowState": {
+    "width": 1280,
+    "height": 720,
+    "isFullscreen": true
+  }
+}

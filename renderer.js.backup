@@ -1,0 +1,3745 @@
+// ===== SISTEMA PSBOX (ESTILO PS4 REAL) =====
+class PSBOXSystem {
+    constructor() {
+        this.games = [];
+        this.carouselItems = [];
+        this.currentCenterIndex = 0;
+        this.totalCarouselItems = 0;
+        this.isAnimating = false;
+
+        this.visibilityHandler = null;
+        this.focusHandler = null;
+        this.blurHandler = null;
+        this.mouseMoveHandler = null;
+        this.keyDownHandler = null;
+        this.windowCheckInterval = null;
+        this.gameProcessCheckInterval = null;
+        this.gameWasHidden = false;
+        this.restoreAttempted = false;
+        this.monitoringStartTime = 0;
+        this.lastGameCheckTime = 0;
+
+        this.selectedIndex = 0;
+        this.totalItems = 2;
+
+        this.currentRunningGame = null;
+        this.gameMonitorInterval = null;
+        this.isMonitoringGame = false;
+
+        this.dpadHoldStart = { left: 0, right: 0 };
+        this.currentSpeed = { left: 200, right: 200 };
+        this.minSpeed = 50;      // Velocidad máxima (más rápida)
+        this.maxSpeed = 300;     // Velocidad inicial (normal)
+        this.acceleration = 0.8; // Factor de aceleración
+        this.holdThreshold = 500; // Tiempo para activar aceleración (ms)
+
+        this.dpadUpPressed = false;
+        this.dpadDownPressed = false;
+        this.dpadLeftPressed = false;
+        this.dpadRightPressed = false;
+        this.optionsPressed = false;
+
+        // Funciones de navegación en configuración
+        this.configNavigateUp = () => { };
+        this.configNavigateDown = () => { };
+        this.configPerformAction = () => { };
+
+        this.animationDuration = 500;
+        this.isAnimating = false;
+        this.animationQueue = [];
+
+        this.controlMode = 'gamepad'; // Por defecto: gamepad
+        this.isInQuickMenu = false;
+        this.isInModal = false;
+        this.isQuickMenuOpen = false;
+        this.isLoading = false;
+
+        this.buttonAPressed = false;
+        this.buttonBPressed = false;
+        this.buttonXPressed = false;
+        this.buttonYPressed = false;
+
+        this.quickMenuItems = [];
+        this.quickMenuSelectedIndex = 0;
+
+        this.gamepads = [];
+        this.activeGamepad = null;
+        this.lastGamepadUpdate = 0;
+        this.gamepadDelay = 200;
+
+        this.quickMenuTimer = null;
+        this.loadingInterval = null;
+        this.loadingProgress = 0;
+        this.currentLoadingGame = null;
+
+        this.isLoading = false;
+        this.buttonAPressed = false;
+        this.dpadLeftPressed = false;
+        this.dpadRightPressed = false;
+        this.optionsPressed = false;
+        this.lastGamepadUpdate = 0;
+
+        this.keyboardHandler = null;
+
+        // 🆕 Control de inactividad para activar teclado/mouse
+        this.inactivityTimer = null;
+        this.inactivityTimeout = 60000; // 60 segundos
+
+        this.init();
+        this.windowState = 'foreground';
+        // foreground | background | launching
+
+    }
+
+    // 🔥 PARTE 4: Agregar al método init() - Busca el método init() y agrega esto al final:
+    async init() {
+        await this.loadConfig();
+        this.initUI();
+        this.initGamepad();
+        this.startSystemLoops();
+
+        this.enterFullscreen();
+        this.cleanDuplicateEvents();
+        // 🆕 Iniciar en modo gamepad (sin cursor)
+        this.setGamepadMode();
+        this.startInactivityTimer();
+
+        this.setupCarousel();
+
+        // 🔥 CAMBIO AQUÍ: Iniciar con el último juego jugado
+        await this.setLastPlayedGameAsCenter();
+
+        this.selectedIndex = 0;
+        this.renderCarousel();
+        this.setupEmergencyHotkeys();
+        // 🔥 NUEVO: Configurar evento global de visibilidad
+        this.setupVisibilityHandlers();
+
+        console.log('✅ PSBOX inicializado completamente');
+    }
+
+    cleanDuplicateEvents() {
+        console.log('🧹 Limpiando eventos duplicados...');
+
+        // Remover todos los event listeners del body
+        const oldBody = document.body.cloneNode(true);
+        document.body.parentNode.replaceChild(oldBody, document.body);
+
+        // Remover listeners específicos
+        const events = ['click', 'keydown', 'gamepadconnected', 'gamepaddisconnected'];
+        events.forEach(event => {
+            document.removeEventListener(event, () => { });
+            window.removeEventListener(event, () => { });
+        });
+
+        console.log('✅ Eventos limpiados');
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Configurar manejadores de visibilidad
+    setupVisibilityHandlers() {
+        console.log('👀 Configurando monitoreo de visibilidad...');
+
+        // Escuchar cuando la ventana gana foco
+        window.addEventListener('focus', () => {
+            console.log('🎯 Ventana enfocada');
+
+            // Si estábamos monitoreando un juego y la ventana recibe foco
+            if (this.isMonitoringGame && this.currentRunningGame) {
+                console.log('🔄 Ventana enfocada durante monitoreo - Verificando...');
+
+                // Pequeño delay para evitar falsos positivos
+                setTimeout(() => {
+                    if (document.visibilityState === 'visible') {
+                        console.log('✅ Confirmado: Juego cerrado, restaurando...');
+                        this.onGameClosed();
+                    }
+                }, 300);
+            }
+        });
+
+        // Escuchar mensajes del API si existe
+        if (window.psboxAPI && psboxAPI.onGameClosed) {
+            psboxAPI.onGameClosed(() => {
+                console.log('📨 API notificó cierre del juego');
+                this.onGameClosed();
+            });
+        }
+
+        console.log('✅ Monitoreo de visibilidad configurado');
+    }
+    async loadConfig() {
+        try {
+            if (window.psboxAPI && psboxAPI.getConfig) {
+                const config = await psboxAPI.getConfig();
+                if (config) {
+                    this.games = config.games || [];
+                    this.controlMode = config.controlMode || 'gamepad';
+                    console.log('Configuración cargada desde API:', config);
+                }
+            } else {
+                const savedConfig = localStorage.getItem('psbox_config');
+                if (savedConfig) {
+                    const config = JSON.parse(savedConfig);
+                    this.games = config.games || [];
+                    this.controlMode = config.controlMode || 'gamepad';
+                    console.log('Configuración cargada desde localStorage:', config);
+                }
+            }
+        } catch (error) {
+            console.error('Error cargando configuración:', error);
+            this.games = [];
+        }
+
+        this.totalItems = 2 + this.games.length;
+        this.totalCarouselItems = 2 + this.games.length;
+    }
+
+    // 🔥 EN EL SCRIPT, AGREGAR:
+    setupModalEvents() {
+        // Solo un event listener para el botón
+        const addGameBtn = document.getElementById('addGameButton');
+        if (addGameBtn) {
+            // Remover listeners anteriores
+            addGameBtn.replaceWith(addGameBtn.cloneNode(true));
+
+            // Agregar nuevo listener
+            document.getElementById('addGameButton').addEventListener('click', () => {
+                console.log('🖱️ Botón Agregar Juego clickeado');
+                this.addNewGame();
+            });
+        }
+    }
+    // 🔥 REEMPLAZA handleAddNewGame CON ESTO:
+
+
+    async saveConfig() {
+        const config = {
+            games: this.games,
+            controlMode: this.controlMode,
+            lastPlayedIndex: this.currentCenterIndex,
+            lastSaved: new Date().toISOString()
+        };
+
+        try {
+            if (window.psboxAPI && psboxAPI.saveConfig) {
+                await psboxAPI.saveConfig(config);
+            } else {
+                localStorage.setItem('psbox_config', JSON.stringify(config));
+                console.log('Configuración guardada en localStorage:', config);
+            }
+        } catch (error) {
+            console.error('Error guardando configuración:', error);
+        }
+    }
+
+    initUI() {
+        this.updateTime();
+        setInterval(() => this.updateTime(), 1000);
+
+        this.setupModalEvents();
+        this.setupControlEvents();
+        this.updateControlModeIndicator();
+        this.setupQuickMenu();
+        this.setupImageEvents();
+    }
+
+    updateTime() {
+        const now = new Date();
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        document.getElementById('currentTime').textContent = `${hours}:${minutes}`;
+    }
+
+    enterFullscreen() {
+        if (window.psboxAPI && psboxAPI.enterFullscreen) {
+            psboxAPI.enterFullscreen();
+        } else {
+            if (document.documentElement.requestFullscreen) {
+                document.documentElement.requestFullscreen().catch(err => {
+                    console.log('No se pudo entrar en pantalla completa:', err);
+                });
+            }
+        }
+    }
+
+    // 🔥 MEJORAR restorePSBOX para mostrar correctamente
+    restorePSBOX() {
+        console.log('🔄 Restaurando PSBOX...');
+
+        // 1. Cambiar estado
+        this.windowState = 'foreground';
+
+        // 2. Remover efectos de fondo
+        document.body.classList.remove('background-mode');
+
+        // 3. Restaurar visibilidad completa
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+        document.body.style.pointerEvents = 'all';
+        document.body.style.transform = 'scale(1)';
+
+        // 4. Mostrar todos los elementos
+        const importantElements = [
+            '.ps4-container',
+            '.carousel-container',
+            '.ps4-header',
+            '.carousel-track',
+            '.carousel-item',
+            '.ps4-content'
+        ];
+
+        importantElements.forEach(selector => {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach(el => {
+                el.style.display = '';
+                el.style.visibility = 'visible';
+                el.style.opacity = '1';
+            });
+        });
+
+        // 5. Usar API si existe
+        if (window.psboxAPI && psboxAPI.restoreWindow) {
+            psboxAPI.restoreWindow().then(() => {
+                console.log('✅ Ventana restaurada vía API');
+
+                // 6. Entrar en pantalla completa después de restaurar
+                setTimeout(() => {
+                    this.enterFullscreen();
+                }, 300);
+
+            }).catch(error => {
+                console.error('❌ Error API:', error);
+                this.fallbackFullscreen();
+            });
+        } else {
+            // Modo desarrollo
+            console.log('🔄 Modo desarrollo: Restauración visual');
+            this.fallbackFullscreen();
+        }
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Cerrar PSBOX directamente
+    // 🔥 CORREGIDO: Cerrar PSBOX correctamente
+    // 🔥 VERSIÓN CORREGIDA Y SEGURA
+    // 🔥 VERSIÓN FINAL Y FUNCIONAL de closePSBOX()
+    closePSBOX() {
+        console.log('🚪 Cerrando PSBOX...');
+
+        // 1. UI inmediata
+        this.closeQuickMenu();
+        this.showNotification('Cerrando', 'PSBOX se está cerrando...', 'info');
+
+        // 2. Guardar datos importantes
+        this.saveConfig().catch(e => console.error('Error guardando:', e));
+
+        // 3. Intentar cierre después de 600ms
+        setTimeout(() => {
+            this.executeClose();
+        }, 600);
+    }
+
+    executeClose() {
+        console.log('🔧 Ejecutando cierre...');
+
+        // ¿Tenemos API de PSBOX?
+        const hasAPI = window.psboxAPI && typeof psboxAPI.closeApp === 'function';
+
+        if (hasAPI) {
+            // USAR API OFICIAL
+            console.log('✅ Usando API oficial de PSBOX');
+            psboxAPI.closeApp().then(result => {
+                console.log('📊 Resultado API:', result);
+                this.verifyAndForceClose();
+            }).catch(error => {
+                console.error('❌ Error API:', error);
+                this.forceCloseDirectly();
+            });
+        } else {
+            // NO HAY API - Cerrar directamente
+            console.log('⚠️ Sin API, cerrando directamente');
+            this.forceCloseDirectly();
+        }
+    }
+
+    verifyAndForceClose() {
+        // Verificar si se cerró después de 1.2 segundos
+        setTimeout(() => {
+            console.log('🔍 Verificando si se cerró...');
+            // Si llegamos aquí, es que NO se cerró
+            this.forceCloseDirectly();
+        }, 1200);
+    }
+
+    forceCloseDirectly() {
+        console.log('⚡ Forzando cierre directo...');
+
+        // Intentar todos los métodos posibles
+        const closeAttempts = [
+            () => { try { window.close(); return true; } catch (e) { return false; } },
+            () => { try { window.open('', '_self', '').close(); return true; } catch (e) { return false; } },
+            () => { try { window.location.href = 'about:blank'; return true; } catch (e) { return false; } },
+            () => {
+                // Último recurso: mensaje al usuario
+                setTimeout(() => {
+                    const modal = document.createElement('div');
+                    modal.innerHTML = `
+                    <div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.95);z-index:99999;display:flex;align-items:center;justify-content:center;">
+                        <div style="background:#111;padding:30px;border-radius:15px;border:2px solid #00a8ff;max-width:400px;text-align:center;color:white;">
+                            <h3 style="color:#00a8ff">Cerrar Manualmente</h3>
+                            <p>Usa <strong>ALT + F4</strong> para cerrar PSBOX</p>
+                            <button onclick="this.parentElement.parentElement.remove()" style="background:#00a8ff;color:white;border:none;padding:10px 20px;border-radius:5px;margin-top:15px;cursor:pointer;">
+                                OK
+                            </button>
+                        </div>
+                    </div>
+                `;
+                    document.body.appendChild(modal);
+                }, 300);
+                return true;
+            }
+        ];
+
+        // Ejecutar intentos secuencialmente
+        for (let attempt of closeAttempts) {
+            if (attempt()) {
+                console.log('✅ Método de cierre ejecutado');
+                break;
+            }
+        }
+    }
+
+    // 🔥 FUNCIÓN DE EMERGENCIA (si closeApp falla)
+    emergencyClose() {
+        console.log('🚨 Activando cierre de emergencia...');
+
+        // Intentar diferentes métodos
+        const methods = [
+            () => {
+                // Método A: window.close() directo
+                try {
+                    window.close();
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            },
+            () => {
+                // Método B: Redirección forzada
+                try {
+                    window.location.href = 'about:blank';
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            },
+            () => {
+                // Método C: Forzar reload y luego intentar cerrar
+                try {
+                    window.onbeforeunload = null;
+                    window.location.reload();
+                    setTimeout(() => {
+                        try { window.close(); } catch (e) { }
+                    }, 100);
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            }
+        ];
+
+        // Ejecutar métodos en orden
+        let success = false;
+        for (let method of methods) {
+            if (!success) {
+                success = method();
+            }
+        }
+
+        // Si nada funcionó, mostrar ayuda
+        if (!success) {
+            console.log('❌ Todos los métodos fallaron, mostrando ayuda...');
+            this.showCloseHelp();
+        }
+    }
+
+    // 🔥 MOSTRAR AYUDA PARA CERRAR MANUALMENTE
+    showCloseHelp() {
+        const helpHTML = `
+        <div style="
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.98);
+            z-index: 99999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(20px);
+            animation: fadeIn 0.3s ease;
+        ">
+            <div style="
+                background: linear-gradient(135deg, rgba(0, 0, 0, 0.9), rgba(0, 102, 204, 0.2));
+                border: 2px solid #00a8ff;
+                border-radius: 20px;
+                padding: 40px;
+                max-width: 600px;
+                width: 90%;
+                color: white;
+                text-align: center;
+                box-shadow: 0 20px 60px rgba(0, 168, 255, 0.3);
+            ">
+                <div style="
+                    font-size: 48px;
+                    margin-bottom: 20px;
+                    color: #00a8ff;
+                ">⚠️</div>
+                
+                <h2 style="
+                    color: #00a8ff;
+                    margin-bottom: 20px;
+                    font-size: 28px;
+                ">Cierre Manual Requerido</h2>
+                
+                <p style="
+                    margin-bottom: 25px;
+                    line-height: 1.6;
+                    font-size: 16px;
+                    opacity: 0.9;
+                ">
+                    PSBOX no pudo cerrarse automáticamente.<br>
+                    Por favor, usa uno de estos métodos:
+                </p>
+                
+                <div style="
+                    background: rgba(0, 102, 204, 0.15);
+                    border-radius: 12px;
+                    padding: 25px;
+                    margin-bottom: 30px;
+                    text-align: left;
+                    border-left: 4px solid #00a8ff;
+                ">
+                    <div style="margin-bottom: 15px;">
+                        <span style="
+                            background: #00a8ff;
+                            color: black;
+                            padding: 4px 10px;
+                            border-radius: 20px;
+                            font-weight: bold;
+                            margin-right: 10px;
+                        ">1</span>
+                        <strong style="color: #00a8ff;">ALT + F4</strong> - Cerrar ventana directamente
+                    </div>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <span style="
+                            background: #00a8ff;
+                            color: black;
+                            padding: 4px 10px;
+                            border-radius: 20px;
+                            font-weight: bold;
+                            margin-right: 10px;
+                        ">2</span>
+                        <strong style="color: #00a8ff;">Click en la X</strong> - Esquina superior derecha
+                    </div>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <span style="
+                            background: #00a8ff;
+                            color: black;
+                            padding: 4px 10px;
+                            border-radius: 20px;
+                            font-weight: bold;
+                            margin-right: 10px;
+                        ">3</span>
+                        <strong style="color: #00a8ff;">Ctrl + Shift + Esc</strong> - Abrir administrador de tareas
+                    </div>
+                </div>
+                
+                <button id="psboxCloseHelpBtn" style="
+                    background: linear-gradient(135deg, #0066cc, #00a8ff);
+                    color: white;
+                    border: none;
+                    padding: 15px 40px;
+                    border-radius: 10px;
+                    font-size: 16px;
+                    font-weight: bold;
+                    cursor: pointer;
+                    transition: all 0.3s;
+                    margin-top: 10px;
+                " onmouseover="this.style.transform='scale(1.05)'; this.style.boxShadow='0 0 20px rgba(0, 168, 255, 0.5)';" 
+                onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='none';">
+                    ENTENDIDO
+                </button>
+                
+                <p style="
+                    margin-top: 25px;
+                    font-size: 14px;
+                    opacity: 0.6;
+                    font-style: italic;
+                ">
+                    Este mensaje se auto-ocultará en 10 segundos
+                </p>
+            </div>
+        </div>
+        
+        <style>
+            @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+        </style>
+    `;
+
+        // Crear y mostrar el modal
+        const helpDiv = document.createElement('div');
+        helpDiv.innerHTML = helpHTML;
+        document.body.appendChild(helpDiv);
+
+        // Configurar botón de cierre
+        setTimeout(() => {
+            const closeBtn = document.getElementById('psboxCloseHelpBtn');
+            if (closeBtn) {
+                closeBtn.onclick = () => {
+                    helpDiv.remove();
+                };
+            }
+        }, 100);
+
+        // Auto-ocultar después de 10 segundos
+        setTimeout(() => {
+            if (document.body.contains(helpDiv)) {
+                helpDiv.remove();
+            }
+        }, 10000);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Métodos alternativos para cerrar
+    forceClosePSBOX() {
+        console.log('⚡ Usando métodos alternativos de cierre...');
+
+        // Intentar diferentes métodos en orden
+        const closeMethods = [
+            // Método 1: Cerrar ventana (funciona en navegador/Electron)
+            () => {
+                try {
+                    window.close();
+                    console.log('✅ Intento 1: window.close() ejecutado');
+                    return true;
+                } catch (e) {
+                    console.log('❌ window.close() falló:', e.message);
+                    return false;
+                }
+            },
+
+            // Método 2: Abrir ventana en blanco y cerrar (truco para Chrome)
+            () => {
+                try {
+                    window.open('', '_self', '').close();
+                    console.log('✅ Intento 2: window.open().close() ejecutado');
+                    return true;
+                } catch (e) {
+                    console.log('❌ Método 2 falló:', e.message);
+                    return false;
+                }
+            },
+
+            // Método 3: Redirigir a about:blank (para forzar cierre)
+            () => {
+                try {
+                    window.location.href = 'about:blank';
+                    console.log('✅ Intento 3: Redirigido a about:blank');
+                    return true;
+                } catch (e) {
+                    console.log('❌ Redirección falló:', e.message);
+                    return false;
+                }
+            },
+
+            // Método 4: PostMessage si está en iframe
+            () => {
+                if (window.parent !== window) {
+                    try {
+                        window.parent.postMessage('CLOSE_PSBOX_APP', '*');
+                        console.log('✅ Intento 4: Enviado mensaje a padre');
+                        return true;
+                    } catch (e) {
+                        return false;
+                    }
+                }
+                return false;
+            }
+        ];
+
+        // Ejecutar métodos secuencialmente
+        let closed = false;
+        for (let i = 0; i < closeMethods.length; i++) {
+            if (!closed) {
+                console.log(`🔄 Probando método ${i + 1}...`);
+                closed = closeMethods[i]();
+
+                if (closed) {
+                    console.log(`🎯 ¡Método ${i + 1} exitoso!`);
+                    break;
+                }
+            }
+        }
+
+        // Si nada funcionó, mostrar instrucciones
+        if (!closed) {
+            console.log('❌ Ningún método funcionó, mostrando ayuda...');
+
+            setTimeout(() => {
+                // Crear modal de ayuda
+                const helpModal = document.createElement('div');
+                helpModal.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.95);
+                z-index: 99999;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                backdrop-filter: blur(10px);
+            `;
+
+                helpModal.innerHTML = `
+                <div style="
+                    background: rgba(0, 0, 0, 0.9);
+                    border: 2px solid #00a8ff;
+                    border-radius: 16px;
+                    padding: 30px;
+                    max-width: 500px;
+                    text-align: center;
+                    color: white;
+                ">
+                    <h2 style="color: #00a8ff; margin-bottom: 20px;">⚠️ Cierre Manual Requerido</h2>
+                    <p style="margin-bottom: 15px; line-height: 1.6;">
+                        PSBOX no pudo cerrarse automáticamente.
+                    </p>
+                    <div style="
+                        background: rgba(0, 102, 204, 0.2);
+                        border-left: 4px solid #00a8ff;
+                        padding: 15px;
+                        margin: 20px 0;
+                        text-align: left;
+                        border-radius: 8px;
+                    ">
+                        <h4 style="margin-top: 0; color: #00a8ff;">Para cerrar PSBOX:</h4>
+                        <ol style="margin: 10px 0; padding-left: 20px;">
+                            <li><strong>ALT + F4</strong> - Cerrar ventana</li>
+                            <li><strong>Click en la X</strong> - Esquina superior derecha</li>
+                            <li><strong>Ctrl + Shift + Esc</strong> - Abrir administrador de tareas</li>
+                        </ol>
+                    </div>
+                    <button id="closeHelpBtn" style="
+                        background: linear-gradient(135deg, #0066cc, #00a8ff);
+                        color: white;
+                        border: none;
+                        padding: 12px 24px;
+                        border-radius: 8px;
+                        font-size: 16px;
+                        cursor: pointer;
+                        margin-top: 20px;
+                        transition: all 0.3s;
+                    ">Entendido</button>
+                </div>
+            `;
+
+                document.body.appendChild(helpModal);
+
+                // Configurar botón de cierre
+                document.getElementById('closeHelpBtn').onclick = () => {
+                    helpModal.remove();
+                };
+
+                // Auto-eliminar después de 10 segundos
+                setTimeout(() => {
+                    if (document.body.contains(helpModal)) {
+                        helpModal.remove();
+                    }
+                }, 10000);
+
+            }, 1000);
+        }
+    }
+    setupImageEvents() {
+        const coverFile = document.getElementById('coverFile');
+        const loadingImageFile = document.getElementById('loadingImageFile');
+
+        coverFile.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const preview = document.getElementById('coverPreview');
+                    preview.innerHTML = `<img src="${event.target.result}" alt="Vista previa">`;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        loadingImageFile.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const preview = document.getElementById('loadingImagePreview');
+                    preview.innerHTML = `<img src="${event.target.result}" alt="Vista previa">`;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+    }
+    // ===== CONTROL DE CURSOR Y MODO =====
+    setGamepadMode() {
+        document.body.classList.remove('keyboard-mode');
+        document.body.classList.add('gamepad-mode');
+        this.controlMode = 'gamepad';
+        this.updateControlModeIndicator();
+        this.disableKeyboardNavigation();
+
+        // Ocultar cursor completamente
+        document.body.style.cursor = 'none';
+
+        // Activar navegación por gamepad
+        if (this.gamepads.length === 0) {
+            this.initGamepad(); // Intentar detectar gamepads
+        }
+    }
+
+    setKeyboardMode() {
+        document.body.classList.remove('gamepad-mode');
+        document.body.classList.add('keyboard-mode');
+        this.controlMode = 'keyboard';
+        this.updateControlModeIndicator();
+        this.setupKeyboardEvents();
+
+        // Mostrar cursor
+        document.body.style.cursor = 'default';
+    }
+
+    setupKeyboardEvents() {
+        if (this.keyboardHandler) {
+            document.removeEventListener('keydown', this.keyboardHandler);
+        }
+
+        this.keyboardHandler = (e) => {
+            if (this.isInModal || this.isLoading) return;
+
+            // Solo procesar si estamos en modo teclado
+            if (this.controlMode !== 'keyboard') return;
+
+            switch (e.key) {
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    this.navigateLeft();
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    this.navigateRight();
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    this.navigateUp();
+                    break;
+                case 'ArrowDown':
+                    e.preventDefault();
+                    this.navigateDown();
+                    break;
+                case 'Enter':
+                case ' ':
+                    e.preventDefault();
+                    this.performAction();
+                    break;
+                case 'Escape':
+                    e.preventDefault();
+                    if (this.isQuickMenuOpen) {
+                        this.closeQuickMenu();
+                    } else if (this.isInModal) {
+                        this.closeCurrentModal();
+                    }
+                    break;
+                case 'Insert':
+                    e.preventDefault();
+                    this.openAddGameModal();
+                    break;
+                case 'Delete':
+                    e.preventDefault();
+                    this.removeSelectedGame();
+                    break;
+                case 'Tab':
+                    e.preventDefault();
+                    this.openQuickMenu();
+                    break;
+            }
+        };
+
+        document.addEventListener('keydown', this.keyboardHandler);
+
+        // También habilitar eventos de mouse
+        this.enableMouseEvents();
+    }
+
+    enableMouseEvents() {
+        // Solo en modo teclado
+        if (this.controlMode !== 'keyboard') return;
+
+        const carouselTrack = document.getElementById('carouselTrack');
+        if (carouselTrack) {
+            carouselTrack.addEventListener('click', (e) => {
+                const carouselItem = e.target.closest('.carousel-item');
+                if (carouselItem) {
+                    const index = parseInt(carouselItem.dataset.index);
+                    if (index === this.currentCenterIndex) {
+                        this.performAction();
+                    } else {
+                        const diff = index - this.currentCenterIndex;
+                        this.navigateCarousel(diff);
+                    }
+                }
+            });
+        }
+    }
+
+    disableKeyboardNavigation() {
+        if (this.keyboardHandler) {
+            document.removeEventListener('keydown', this.keyboardHandler);
+            this.keyboardHandler = null;
+        }
+    }
+
+    startInactivityTimer() {
+        // Limpiar timer existente
+        if (this.inactivityTimer) {
+            clearTimeout(this.inactivityTimer);
+        }
+
+        // Si hay gamepad conectado, no iniciar timer
+        if (this.gamepads.length > 0) {
+            return;
+        }
+
+        // Iniciar timer de 60 segundos
+        this.inactivityTimer = setTimeout(() => {
+            if (this.gamepads.length === 0) {
+                this.setKeyboardMode();
+                this.showNotification('Modo Teclado/Ratón', 'No se detectó mando. Modo teclado/ratón activado.', 'info');
+            }
+        }, this.inactivityTimeout);
+    }
+
+    resetInactivityTimer() {
+        if (this.inactivityTimer) {
+            clearTimeout(this.inactivityTimer);
+            this.inactivityTimer = null;
+        }
+    }
+    // ===== CARRUSEL ESTILO PS4 =====
+    setupCarousel() {
+        this.carouselItems = [];
+        this.currentCenterIndex = 0;
+        this.totalCarouselItems = 2 + this.games.length;
+    }
+
+    // 🔥 EN EL MÉTODO renderCarousel(), CORREGIR EL onClick:
+    renderCarousel() {
+        const carouselTrack = document.getElementById('carouselTrack');
+        if (!carouselTrack) return;
+
+        carouselTrack.innerHTML = '';
+        this.carouselItems = [];
+
+        // 🔥 VARIABLE PARA CONTROLAR CLICKS MÚLTIPLES
+        let clickCooldown = false;
+
+        const allItems = [
+            { type: 'app', name: 'Configuración', icon: '⚙️', action: () => this.openConfigModal() },
+            { type: 'app', name: 'Agregar Juego', icon: '+', action: () => this.openAddGameModal() },
+            ...this.games.map(game => ({
+                type: 'game',
+                game: game,
+                name: game.name,
+                cover: game.cover,
+                action: () => this.launchGame(game)
+            }))
+        ];
+
+        allItems.forEach((item, index) => {
+            const el = document.createElement('div');
+            el.className = 'carousel-item';
+            el.dataset.index = index;
+
+            if (item.type === 'app') {
+                el.innerHTML = `
+                <div class="carousel-cover">
+                    <div class="carousel-icon">${item.icon}</div>
+                </div>
+                <div class="carousel-info">
+                    <div class="carousel-title">${item.name}</div>
+                </div>
+            `;
+            } else {
+                el.innerHTML = `
+                <div class="carousel-cover">
+                    ${item.cover ? `<img src="${item.cover}" alt="${item.name}">` : `<div class="carousel-icon">🎮</div>`}
+                </div>
+                <div class="carousel-info">
+                    <div class="carousel-title">${item.name}</div>
+                </div>
+            `;
+            }
+
+            // 🔥 CORREGIR EL EVENTO CLICK PARA EVITAR DOBLE EJECUCIÓN
+            // 🔥 EN renderCarousel(), MODIFICAR EL ONCLICK:
+            // 🔥 EN renderCarousel(), HACER EL CLICK SIMPLE:
+            el.onclick = () => {
+                console.log('🖱️ Click en item:', index);
+
+                if (index === this.currentCenterIndex) {
+                    // Mismo item - ejecutar acción
+                    if (index === 0) {
+                        this.openConfigModal();
+                    } else if (index === 1) {
+                        this.openAddGameModal();
+                    } else {
+                        const gameIndex = index - 2;
+                        if (gameIndex >= 0 && gameIndex < this.games.length) {
+                            const game = this.games[gameIndex];
+                            this.launchGame(game);
+                        }
+                    }
+                } else {
+                    // Item diferente - navegar
+                    const diff = index - this.currentCenterIndex;
+                    this.navigateCarousel(diff);
+                }
+            };
+
+            carouselTrack.appendChild(el);
+            this.carouselItems.push(el);
+        });
+
+        this.totalCarouselItems = this.carouselItems.length;
+        this.updateCarouselPositions();
+    }
+
+    // 🔥 AGREGAR AL FINAL DE LA CLASE
+    resetAllCooldowns() {
+        console.log('🔄 Reseteando todos los cooldowns...');
+        this.gameLaunchCooldown = false;
+        this.buttonCooldown = false;
+        this.isLoading = false;
+        this.lastGameLaunchTime = 0;
+        this.lastButtonPressTime = 0;
+    }
+
+
+    navigateCarousel(direction) {
+        const nextIndex = this.currentCenterIndex + direction;
+
+        // 🚧 pared invisible
+        if (nextIndex < 0 || nextIndex >= this.totalCarouselItems) return;
+
+        this.currentCenterIndex = nextIndex;
+        this.updateCarouselPositions();
+    }
+
+
+
+    getCircularIndex(index) {
+        const total = this.totalCarouselItems;
+        return (index + total) % total;
+    }
+
+    updateCarouselPositions() {
+        this.carouselItems.forEach((el, index) => {
+            el.classList.remove(
+                'left',
+                'center',
+                'right',
+                'hidden',
+                'left-side',
+                'right-side'
+            );
+
+            const position = this.getCarouselPosition(index);
+            position.split(' ').forEach(cls => el.classList.add(cls));
+        });
+    }
+
+
+    getCarouselPosition(itemIndex) {
+        const diff = itemIndex - this.currentCenterIndex;
+
+        if (diff === 0) return 'center';
+        if (diff === -1) return 'left';
+        if (diff === 1) return 'right';
+
+        if (diff < -1) return 'hidden left-side';
+        return 'hidden right-side';
+    }
+
+
+    navigateLeft() {
+        if (this.isInQuickMenu) {
+            this.navigateQuickMenuUp();
+        } else {
+            this.navigateCarousel(-1);
+        }
+    }
+
+    navigateRight() {
+        if (this.isInQuickMenu) {
+            this.navigateQuickMenuDown();
+        } else {
+            this.navigateCarousel(1);
+        }
+    }
+
+    navigateUp() {
+        if (this.isInQuickMenu) {
+            this.navigateQuickMenuUp();
+        }
+    }
+
+    navigateDown() {
+        if (this.isInQuickMenu) {
+            this.navigateQuickMenuDown();
+        }
+    }
+
+    // 🔥 MODIFICAR performAction para evitar doble ejecución
+    performAction() {
+        console.log('🔍 DEBUG performAction:');
+        console.log('- gameLaunchCooldown:', this.gameLaunchCooldown);
+        console.log('- isLoading:', this.isLoading);
+
+        if (this.isInQuickMenu) {
+            this.selectQuickMenuItem();
+            return;
+        }
+
+        const allItems = [
+            { type: 'app', index: 0, action: () => this.openConfigModal() },
+            { type: 'app', index: 1, action: () => this.openAddGameModal() },
+            ...this.games.map((game, idx) => ({
+                type: 'game',
+                index: idx + 2,
+                action: () => this.launchGame(game)
+            }))
+        ];
+
+        const currentItem = allItems[this.currentCenterIndex];
+        if (currentItem) {
+            console.log(`🎮 Ejecutando acción: ${currentItem.type === 'game' ? 'Juego' : 'App'}`);
+
+            // 🔥 COOLDOWN SOLO PARA JUEGOS
+            if (currentItem.type === 'game') {
+                const now = Date.now();
+                if (this.gameLaunchCooldown && (now - this.lastGameLaunchTime < this.gameLaunchDelay)) {
+                    console.log('⏳ Juego en cooldown, espera...');
+                    return;
+                }
+
+                // Activar cooldown para juegos
+                this.gameLaunchCooldown = true;
+                this.lastGameLaunchTime = now;
+
+                // Desactivar después del delay
+                setTimeout(() => {
+                    this.gameLaunchCooldown = false;
+                    console.log('✅ Cooldown de juego finalizado');
+                }, this.gameLaunchDelay);
+            }
+
+            // Ejecutar la acción
+            currentItem.action();
+        }
+    }
+
+    selectItem(index) {
+        const total = this.totalCarouselItems;
+        if (index < 0 || index >= total) return;
+
+        const diff = index - this.currentCenterIndex;
+        this.navigateCarousel(diff);
+    }
+    // ===== NAVEGACIÓN EN MODAL DE CONFIGURACIÓN =====
+    setupConfigNavigation() {
+        const configItems = document.querySelectorAll('#configModal .quick-menu-item');
+        let configSelectedIndex = 0;
+
+        const updateConfigSelection = () => {
+            configItems.forEach((item, index) => {
+                if (index === configSelectedIndex) {
+                    item.style.background = 'rgba(0, 102, 204, 0.4)';
+                    item.style.borderColor = '#00a8ff';
+                    item.style.transform = 'translateX(5px)';
+                } else {
+                    item.style.background = '';
+                    item.style.borderColor = '';
+                    item.style.transform = '';
+                }
+            });
+        };
+
+        // Navegación en configuración
+        this.configNavigateUp = () => {
+            if (!this.isInModal || !document.getElementById('configModal').classList.contains('active')) return;
+
+            if (configSelectedIndex > 0) {
+                configSelectedIndex--;
+            } else {
+                configSelectedIndex = configItems.length - 1; // Circular
+            }
+            updateConfigSelection();
+        };
+
+        this.configNavigateDown = () => {
+            if (!this.isInModal || !document.getElementById('configModal').classList.contains('active')) return;
+
+            if (configSelectedIndex < configItems.length - 1) {
+                configSelectedIndex++;
+            } else {
+                configSelectedIndex = 0; // Circular
+            }
+            updateConfigSelection();
+        };
+
+        this.configPerformAction = () => {
+            if (!this.isInModal || !document.getElementById('configModal').classList.contains('active')) return;
+
+            if (configItems[configSelectedIndex]) {
+                configItems[configSelectedIndex].click();
+            }
+        };
+
+        // Inicializar selección
+        if (configItems.length > 0) {
+            updateConfigSelection();
+        }
+    }
+
+    // ===== LANZAR JUEGO =====
+    async setLastPlayedGameAsCenter() {
+        // Cargar el índice del último juego jugado
+        let lastPlayedIndex = 0; // Por defecto: Configuración (primer elemento)
+
+        try {
+            if (window.psboxAPI && psboxAPI.getConfig) {
+                const config = await psboxAPI.getConfig();
+                lastPlayedIndex = config.lastPlayedIndex || 0;
+            } else {
+                const savedConfig = localStorage.getItem('psbox_config');
+                if (savedConfig) {
+                    const config = JSON.parse(savedConfig);
+                    lastPlayedIndex = config.lastPlayedIndex || 0;
+                }
+            }
+        } catch (error) {
+            console.error('Error cargando último juego jugado:', error);
+        }
+
+        // Asegurar que el índice esté dentro de los límites
+        const totalItems = 2 + this.games.length;
+        if (lastPlayedIndex >= totalItems) {
+            lastPlayedIndex = 0; // Si el índice es inválido, volver al inicio
+        }
+
+        this.currentCenterIndex = lastPlayedIndex;
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Guardar último juego jugado
+    // 🔥 NUEVA FUNCIÓN: Guardar último juego jugado
+    async saveLastPlayedIndex(index) {
+        try {
+            // Primero cargar la configuración actual
+            let config = {};
+
+            if (window.psboxAPI && psboxAPI.getConfig) {
+                config = await psboxAPI.getConfig() || {};
+            } else {
+                const savedConfig = localStorage.getItem('psbox_config');
+                config = savedConfig ? JSON.parse(savedConfig) : {};
+            }
+
+            // Actualizar el índice
+            config.lastPlayedIndex = index;
+
+            // Guardar
+            if (window.psboxAPI && psboxAPI.saveConfig) {
+                await psboxAPI.saveConfig(config);
+            } else {
+                localStorage.setItem('psbox_config', JSON.stringify(config));
+            }
+        } catch (error) {
+            console.error('Error guardando último juego jugado:', error);
+        }
+    }
+    sendPSBOXToBackground() {
+        this.windowState = 'background';
+
+        if (window.psboxAPI && psboxAPI.minimizeWindow) {
+            // NO cerrar, NO ocultar DOM
+            psboxAPI.minimizeWindow();
+        } else {
+            // modo navegador
+            document.body.classList.add('background-mode');
+        }
+    }
+
+    // 🔥 REEMPLAZAR COMPLETAMENTE LA FUNCIÓN launchGame
+    async launchGame(game) {
+        // 🔥 BLOQUEO SIMPLE Y EFECTIVO
+        if (this.isLoading) {
+            console.log('⏳ Ya se está cargando un juego');
+            return;
+        }
+
+        console.log('🚀 INICIANDO JUEGO:', game.name);
+
+        // BLOQUEAR INMEDIATAMENTE
+        this.isLoading = true;
+
+        // Mostrar pantalla de carga
+        this.showLoadingScreen(game);
+
+        // Esperar 1 segundo para mostrar la pantalla
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        try {
+            // Simular lanzamiento (o usar API real)
+            console.log('🔄 Simulando lanzamiento...');
+
+            if (window.psboxAPI && psboxAPI.launchProgram) {
+                // Código real con API
+                const result = await psboxAPI.launchProgram({
+                    name: game.name,
+                    path: game.path,
+                    args: []
+                });
+
+                if (!result.success) {
+                    throw new Error(result.error);
+                }
+            } else {
+                // Modo simulación
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            // Completar
+            this.completeLoadingScreen();
+
+            // Minimizar PSBOX después
+            setTimeout(() => {
+                this.minimizePSBOX();
+            }, 500);
+
+        } catch (error) {
+            console.error('❌ Error:', error);
+            this.hideLoadingScreen();
+            this.showNotification('Error', 'No se pudo iniciar el juego', 'error');
+            this.isLoading = false;
+        }
+    }
+
+    completeLoadingScreen() {
+        console.log('✅ Completing loading screen...');
+
+        if (this.loadingInterval) {
+            clearInterval(this.loadingInterval);
+            this.loadingInterval = null;
+        }
+
+        const progressBar = document.getElementById('loadingProgress');
+        const loadingText = document.getElementById('loadingText');
+
+        if (progressBar) {
+            progressBar.style.width = '100%';
+        }
+
+        if (loadingText) {
+            loadingText.textContent = '¡Listo! Iniciando juego...';
+        }
+
+        // 🔥 IMPORTANTE: No resetear isLoading todavía
+        // Solo lo resetearemos después de que el juego se haya lanzado
+
+        // Ocultar después de 1 segundo
+        setTimeout(() => {
+            this.hideLoadingScreen();
+            this.showNotification('Éxito', 'Juego iniciado correctamente', 'success');
+        }, 1000);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Manejar errores de lanzamiento
+    handleLaunchError(error, gameName) {
+        this.hideLoadingScreen();
+        this.showNotification('Error', `No se pudo iniciar ${gameName}: ${error.message}`, 'error');
+
+        // Restaurar PSBOX
+        this.restorePSBOX();
+
+        // Limpiar estado
+        this.currentRunningGame = null;
+        this.isLoading = false;
+        this.stopGameMonitoring();
+    }
+
+    startGameMonitoring() {
+        console.log('🎮 INICIANDO MONITOREO MEJORADO DEL JUEGO...');
+
+        // Limpiar cualquier monitoreo anterior
+        this.stopGameMonitoring();
+
+        // Estado inicial
+        this.isMonitoringGame = true;
+        this.gameWasHidden = false;
+        this.monitoringStartTime = Date.now();
+        this.lastGameCheckTime = Date.now();
+        this.gameProcessCheckInterval = null;
+
+        // 🔥 MÉTODO 1: Evento de visibilidad (cuando juego usa pantalla completa)
+        this.visibilityHandler = () => {
+            const isNowVisible = document.visibilityState === 'visible';
+            console.log(`👀 Visibilidad cambiada: ${isNowVisible ? 'VISIBLE' : 'OCULTO'}`);
+
+            if (isNowVisible) {
+                // Si se vuelve visible, verificar si el juego sigue corriendo
+                setTimeout(() => {
+                    this.checkIfGameClosed();
+                }, 500);
+            }
+        };
+
+        document.addEventListener('visibilitychange', this.visibilityHandler);
+
+        // 🔥 MÉTODO 2: Evento de focus/blur de ventana
+        this.focusHandler = () => {
+            console.log('🎯 Ventana recibió FOCUS');
+            setTimeout(() => {
+                this.checkIfGameClosed();
+            }, 300);
+        };
+
+        this.blurHandler = () => {
+            console.log('📝 Ventana perdió FOCUS (juego activo)');
+            this.gameWasHidden = true;
+        };
+
+        window.addEventListener('focus', this.focusHandler);
+        window.addEventListener('blur', this.blurHandler);
+
+        // 🔥 MÉTODO 3: Verificación activa por API (si existe)
+        if (window.psboxAPI && psboxAPI.isProcessRunning) {
+            this.gameProcessCheckInterval = setInterval(async () => {
+                try {
+                    if (this.currentRunningGame) {
+                        const isRunning = await psboxAPI.isProcessRunning(this.currentRunningGame.path);
+                        if (!isRunning) {
+                            console.log('✅ API detectó que el juego se cerró');
+                            this.onGameClosed();
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error verificando proceso:', error);
+                }
+            }, 1000); // Verificar cada segundo
+        }
+
+        // 🔥 MÉTODO 4: Verificación por título de ventana (fallback)
+        this.windowCheckInterval = setInterval(() => {
+            this.checkIfGameClosed();
+        }, 1500); // Verificar cada 1.5 segundos
+
+        // 🔥 MÉTODO 5: Eventos de mouse/teclado como backup
+        this.mouseMoveHandler = () => {
+            if (this.gameWasHidden) {
+                console.log('🖱️ Movimiento de mouse detectado en PSBOX');
+                this.checkIfGameClosed();
+            }
+        };
+
+        this.keyDownHandler = (e) => {
+            if (this.gameWasHidden) {
+                console.log(`⌨️ Tecla presionada: ${e.key}`);
+                this.checkIfGameClosed();
+            }
+        };
+
+        document.addEventListener('mousemove', this.mouseMoveHandler);
+        document.addEventListener('keydown', this.keyDownHandler);
+
+        console.log('✅ Monitoreo mejorado iniciado con 5 métodos');
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Verificar si el juego se cerró
+    checkIfGameClosed() {
+        // No verificar si no estamos monitoreando
+        if (!this.isMonitoringGame || !this.currentRunningGame) {
+            return;
+        }
+
+        const now = Date.now();
+        const timeSinceLastCheck = now - this.lastGameCheckTime;
+
+        // Evitar verificar demasiado seguido
+        if (timeSinceLastCheck < 500) {
+            return;
+        }
+
+        this.lastGameCheckTime = now;
+
+        // Verificar condiciones actuales
+        const isVisible = document.visibilityState === 'visible';
+        const hasFocus = document.hasFocus();
+
+        console.log(`🔍 Verificando: visible=${isVisible}, focus=${hasFocus}`);
+
+        // Si la ventana está visible y tiene foco, asumimos que el juego cerró
+        if (isVisible && hasFocus && this.gameWasHidden) {
+            console.log('✅ Condiciones cumplidas: juego probablemente cerrado');
+            this.onGameClosed();
+        }
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Verificación retrasada para evitar falsos positivos
+    delayedGameClosedCheck() {
+        if (this.restoreAttempted) return;
+
+        console.log('⏳ Iniciando verificación retardada del cierre...');
+        this.restoreAttempted = true;
+
+        // Esperar 800ms para confirmar que realmente cerramos el juego
+        setTimeout(() => {
+            // Verificar condiciones actuales
+            const isVisible = document.visibilityState === 'visible';
+            const hasFocus = document.hasFocus();
+
+            if (isVisible && hasFocus) {
+                console.log('✅ Confirmado: Juego cerrado, PSBOX está activo');
+                this.onGameClosed();
+            } else {
+                console.log('⚠️ Falso positivo, continuando monitoreo...');
+                this.restoreAttempted = false;
+                this.gameWasHidden = true;
+            }
+        }, 800);
+    }
+
+    stopGameMonitoring() {
+        console.log('🛑 DETENIENDO MONITOREO...');
+
+        this.isMonitoringGame = false;
+        this.restoreAttempted = false;
+
+        // Remover TODOS los event listeners
+        const handlers = [
+            ['visibilitychange', this.visibilityHandler],
+            ['focus', this.focusHandler],
+            ['blur', this.blurHandler],
+            ['mousemove', this.mouseMoveHandler],
+            ['keydown', this.keyDownHandler]
+        ];
+
+        handlers.forEach(([event, handler]) => {
+            if (handler) {
+                document.removeEventListener(event, handler);
+                window.removeEventListener(event, handler);
+            }
+        });
+
+        // Limpiar intervalos
+        if (this.gameMonitorInterval) {
+            clearInterval(this.gameMonitorInterval);
+            this.gameMonitorInterval = null;
+        }
+
+        console.log('✅ Monitoreo completamente detenido');
+    }
+
+    // 🔥 PARTE 2: Función onGameClosed mejorada
+    // 🔥 MEJORA LA FUNCIÓN onGameClosed
+    onGameClosed() {
+        // Verificar que realmente haya un juego corriendo
+        if (!this.isMonitoringGame || !this.currentRunningGame) {
+            console.log('⚠️ No hay juego monitoreado activamente');
+            return;
+        }
+
+        console.log('🔄 DETECTADO CIERRE DEL JUEGO...');
+
+        // 1. Detener monitoreo inmediatamente
+        this.stopGameMonitoring();
+
+        // 2. Calcular tiempo jugado
+        const gameName = this.currentRunningGame.name;
+        const playTime = Date.now() - this.currentRunningGame.startTime;
+        const minutes = Math.floor(playTime / 60000);
+        const seconds = Math.floor((playTime % 60000) / 1000);
+
+        console.log(`⏱️ ${gameName}: ${minutes}m ${seconds}s jugados`);
+
+        // 3. Guardar estadísticas
+        this.savePlaytimeStats(this.currentRunningGame.id, playTime);
+
+        // 4. Limpiar referencia
+        this.currentRunningGame = null;
+
+        // 5. 🔥 RESTAURAR PSBOX EN SECUENCIA
+        this.restorePSBOXSequence(gameName);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Secuencia de restauración paso a paso
+    restorePSBOXSequence(gameName) {
+        console.log('🚀 INICIANDO RESTAURACIÓN AUTOMÁTICA...');
+
+        // PASO 1: Forzar visibilidad completa
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+        document.body.style.pointerEvents = 'all';
+
+        // Remover cualquier efecto de fondo
+        document.body.classList.remove('background-mode');
+
+        // PASO 2: Mostrar todos los elementos
+        const containers = ['.ps4-container', '.carousel-container', '.ps4-header', '.carousel-track'];
+        containers.forEach(selector => {
+            const el = document.querySelector(selector);
+            if (el) {
+                el.style.display = '';
+                el.style.visibility = 'visible';
+                el.style.opacity = '1';
+            }
+        });
+
+        // PASO 3: Restaurar ventana (usar API si existe)
+        setTimeout(() => {
+            console.log('🔄 Restaurando ventana...');
+            if (window.psboxAPI && psboxAPI.restoreWindow) {
+                psboxAPI.restoreWindow().then(() => {
+                    console.log('✅ Ventana restaurada vía API');
+                }).catch(error => {
+                    console.error('❌ Error API:', error);
+                    this.fallbackRestore();
+                });
+            } else {
+                this.fallbackRestore();
+            }
+        }, 100);
+
+        // PASO 4: Volver a pantalla completa
+        setTimeout(() => {
+            console.log('🔄 Activando pantalla completa...');
+            this.enterFullscreen();
+        }, 300);
+
+        // PASO 5: Redibujar interfaz
+        setTimeout(() => {
+            console.log('🔄 Actualizando interfaz...');
+
+            // Asegurar que el carrusel esté actualizado
+            if (this.carouselItems && this.carouselItems.length > 0) {
+                this.updateCarouselPositions();
+            }
+
+            // Forzar reflow para renderizado
+            document.body.style.display = 'none';
+            setTimeout(() => {
+                document.body.style.display = 'block';
+            }, 10);
+
+            console.log('✅ Interfaz actualizada');
+        }, 500);
+
+        // PASO 6: Notificación al usuario
+        setTimeout(() => {
+            console.log('🔄 Mostrando notificación...');
+            this.showNotification(
+                'De vuelta en PSBOX',
+                `${gameName} ha finalizado\nPSBOX restaurado automáticamente`,
+                'success'
+            );
+        }, 700);
+
+        // PASO 7: Log final
+        setTimeout(() => {
+            console.log('✅ RESTAURACIÓN COMPLETADA EXITOSAMENTE');
+        }, 1000);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Secuencia de restauración en pasos
+    performRestorationSequence(gameName) {
+        console.log('🚀 INICIANDO SECUENCIA DE RESTAURACIÓN...');
+
+        // PASO 1: Forzar que todo sea visible INMEDIATAMENTE
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+        document.body.style.pointerEvents = 'all';
+
+        // Remover cualquier efecto de "minimizado"
+        document.body.classList.remove('background-mode');
+
+        // Asegurar que todos los contenedores sean visibles
+        const containers = ['.ps4-container', '.carousel-container', '.ps4-header', '.carousel-track'];
+        containers.forEach(selector => {
+            const el = document.querySelector(selector);
+            if (el) {
+                el.style.display = '';
+                el.style.visibility = 'visible';
+                el.style.opacity = '1';
+            }
+        });
+
+        console.log('✅ Paso 1: Visibilidad forzada');
+
+        // PASO 2: Restaurar ventana (usar API si existe)
+        setTimeout(() => {
+            console.log('🔄 Paso 2: Restaurando ventana...');
+            this.restorePSBOX();
+        }, 100);
+
+        // PASO 3: Entrar en pantalla completa
+        setTimeout(() => {
+            console.log('🔄 Paso 3: Activando pantalla completa...');
+            this.enterFullscreen(true);
+        }, 300);
+
+        // PASO 4: Actualizar interfaz
+        setTimeout(() => {
+            console.log('🔄 Paso 4: Actualizando interfaz...');
+
+            // Redibujar carrusel si es necesario
+            if (this.carouselItems && this.carouselItems.length > 0) {
+                this.updateCarouselPositions();
+            }
+
+            // Forzar un reflow
+            document.body.style.display = 'none';
+            setTimeout(() => {
+                document.body.style.display = 'block';
+            }, 10);
+
+            console.log('✅ Interfaz actualizada');
+        }, 500);
+
+        // PASO 5: Mostrar notificación
+        setTimeout(() => {
+            console.log('🔄 Paso 5: Mostrando notificación...');
+            this.showNotification(
+                'De vuelta en PSBOX',
+                `${gameName} finalizado\nPSBOX completamente restaurado`,
+                'success'
+            );
+        }, 700);
+
+        // PASO 6: Log final
+        setTimeout(() => {
+            console.log('✅ RESTAURACIÓN COMPLETADA EXITOSAMENTE');
+            console.log('📊 Estado final:');
+            console.log('- Documento visible:', document.visibilityState === 'visible');
+            console.log('- Ventana en foco:', document.hasFocus());
+            console.log('- Pantalla completa:', !!document.fullscreenElement);
+            console.log('- Juego actual:', this.currentRunningGame);
+            console.log('- Monitoreo activo:', this.isMonitoringGame);
+        }, 1000);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Restauración completa en pasos
+    restorePSBOXAfterGame() {
+        console.log('🚀 Restaurando PSBOX después del juego...');
+
+        // PASO 1: Forzar que el documento sea visible
+        if (document.hidden) {
+            console.log('📄 Documento estaba oculto, forzando visibilidad...');
+            // Esto activará el evento visibilitychange que ya manejamos
+        }
+
+        // PASO 2: Mostrar todo inmediatamente
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+        document.body.style.pointerEvents = 'all';
+
+        // Remover clase de fondo si existe
+        document.body.classList.remove('background-mode');
+
+        // PASO 3: Restaurar ventana (si hay API)
+        this.restorePSBOX();
+
+        // PASO 4: Esperar un momento y luego pantalla completa
+        setTimeout(() => {
+            this.enterFullscreen(true);
+            console.log('✅ Pantalla completa restaurada');
+        }, 300);
+
+        // PASO 5: Mostrar notificación
+        setTimeout(() => {
+            this.showNotification(
+                'De vuelta en PSBOX',
+                'El juego ha finalizado\nPSBOX restaurado',
+                'success'
+            );
+            console.log('✅ Notificación mostrada');
+        }, 500);
+
+        // PASO 6: Forzar redibujado de la interfaz
+        setTimeout(() => {
+            // Asegurar que el carrusel esté visible
+            if (this.carouselItems && this.carouselItems.length > 0) {
+                this.updateCarouselPositions();
+            }
+
+            // Forzar un reflow para asegurar que todo se renderice
+            document.body.style.display = 'none';
+            setTimeout(() => {
+                document.body.style.display = 'block';
+            }, 50);
+
+            console.log('✅ Interfaz completamente restaurada');
+        }, 700);
+    }
+
+    // 🔥 CORREGIDO: Detener monitoreo
+    // 🔥 MEJORA stopGameMonitoring
+    stopGameMonitoring() {
+        console.log('🛑 Deteniendo monitoreo...');
+
+        this.isMonitoringGame = false;
+
+        // Remover todos los event listeners
+        const handlers = [
+            ['visibilitychange', this.visibilityHandler],
+            ['focus', this.focusHandler],
+            ['blur', this.blurHandler],
+            ['mousemove', this.mouseMoveHandler],
+            ['keydown', this.keyDownHandler]
+        ];
+
+        handlers.forEach(([event, handler]) => {
+            if (handler) {
+                document.removeEventListener(event, handler);
+                window.removeEventListener(event, handler);
+            }
+        });
+
+        // Limpiar todos los intervalos
+        if (this.gameProcessCheckInterval) {
+            clearInterval(this.gameProcessCheckInterval);
+            this.gameProcessCheckInterval = null;
+        }
+
+        if (this.windowCheckInterval) {
+            clearInterval(this.windowCheckInterval);
+            this.windowCheckInterval = null;
+        }
+
+        console.log('✅ Monitoreo completamente detenido');
+    }
+
+    // 🔥 FUNCIÓN 2: Cuando el juego se cierra (VERSIÓN LIMPIA)
+    // 🔥 MEJORADO: Restauración forzada para evitar pantalla negra
+    onGameClosed() {
+        // Verificar que no estemos ya en PSBOX
+        if (!this.isMonitoringGame || !this.currentRunningGame) {
+            return;
+        }
+
+        console.log('🔄 Procesando cierre del juego...');
+
+        // 1. Detener monitoreo inmediatamente
+        this.stopGameMonitoring();
+
+        // 2. Forzar visibilidad completa
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+        document.body.style.pointerEvents = 'all';
+
+        // 3. Mostrar estadísticas (opcional)
+        if (this.currentRunningGame) {
+            const playTime = Date.now() - this.currentRunningGame.startTime;
+            const minutes = Math.floor(playTime / 60000);
+            const gameName = this.currentRunningGame.name;
+            console.log(`⏱️ ${gameName}: ${minutes} minutos jugados`);
+        }
+
+        // 4. Limpiar referencia
+        const closedGameName = this.currentRunningGame?.name || 'Juego';
+        this.currentRunningGame = null;
+
+        // 5. 🔥 RESTAURACIÓN COMPLETA
+        this.performFullRestoration(closedGameName);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Restauración completa en pasos
+    performFullRestoration(gameName) {
+        console.log('🚀 Iniciando restauración completa...');
+
+        // PASO 1: Restaurar visualmente
+        this.restorePSBOXWindow();
+
+        // PASO 2: Forzar redibujado de la interfaz
+        setTimeout(() => {
+            // Asegurar que todos los elementos estén visibles
+            const allElements = document.querySelectorAll('*');
+            allElements.forEach(el => {
+                el.style.visibility = 'visible';
+                el.style.opacity = '1';
+            });
+
+            // Redibujar carrusel si es necesario
+            if (this.carouselItems && this.carouselItems.length > 0) {
+                this.updateCarouselPositions();
+            }
+
+            console.log('✅ Interfaz restaurada visualmente');
+
+        }, 100);
+
+        // PASO 3: Volver a pantalla completa
+        setTimeout(() => {
+            this.enterFullscreen(true); // Forzar pantalla completa
+            console.log('✅ Pantalla completa restaurada');
+        }, 300);
+
+        // PASO 4: Mostrar notificación
+        setTimeout(() => {
+            this.showNotification(
+                'De vuelta en PSBOX',
+                `${gameName} finalizado\nPSBOX restaurado`,
+                'success'
+            );
+            console.log('✅ Notificación mostrada');
+        }, 500);
+
+        // PASO 5: Verificar estado final
+        setTimeout(() => {
+            console.log('✅ Restauración completada exitosamente');
+            console.log('📊 Estado actual:');
+            console.log('- Visibilidad:', document.visibilityState);
+            console.log('- En foco:', document.hasFocus());
+            console.log('- Pantalla completa:', !!document.fullscreenElement);
+        }, 1000);
+    }
+
+    // 🔥 FUNCIÓN OPCIONAL: Guardar estadísticas de tiempo jugado
+    savePlaytimeStats(gameId, playTime) {
+        try {
+            // Cargar estadísticas existentes
+            let stats = {};
+            const savedStats = localStorage.getItem('psbox_game_stats');
+            if (savedStats) {
+                stats = JSON.parse(savedStats);
+            }
+
+            // Actualizar estadísticas para este juego
+            if (!stats[gameId]) {
+                stats[gameId] = {
+                    totalPlayTime: 0,
+                    sessions: 0,
+                    lastPlayed: new Date().toISOString()
+                };
+            }
+
+            stats[gameId].totalPlayTime += playTime;
+            stats[gameId].sessions += 1;
+            stats[gameId].lastPlayed = new Date().toISOString();
+
+            // Guardar
+            localStorage.setItem('psbox_game_stats', JSON.stringify(stats));
+
+        } catch (error) {
+            console.error('Error guardando estadísticas:', error);
+        }
+    }
+
+    // 🔥 MODIFICA restorePSBOXWindow para asegurar pantalla completa
+    restorePSBOXWindow() {
+        if (window.psboxAPI && psboxAPI.restoreWindow) {
+            psboxAPI.restoreWindow();
+        } else {
+            // En desarrollo, restaurar visualmente
+            document.body.style.display = 'block';
+            document.body.style.opacity = '1';
+            document.body.style.pointerEvents = 'all';
+            console.log('PSBOX restaurado (modo desarrollo)');
+        }
+
+        // 🔥 Asegurar pantalla completa
+        setTimeout(() => {
+            this.enterFullscreen();
+        }, 100);
+    }
+    // 🔥 MODIFICA enterFullscreen para que sea reutilizable
+    // 🔥 MEJORADO: Entrar en pantalla completa de forma más robusta
+    enterFullscreen(force = false) {
+        console.log('🖥️ Intentando pantalla completa...');
+
+        // Verificar si ya estamos en pantalla completa
+        const isAlreadyFullscreen = !!document.fullscreenElement ||
+            !!document.webkitFullscreenElement ||
+            !!document.mozFullScreenElement;
+
+        if (!force && isAlreadyFullscreen) {
+            console.log('✅ Ya está en pantalla completa');
+            return;
+        }
+
+        // Método 1: Usar API de PSBOX si existe
+        if (window.psboxAPI && psboxAPI.enterFullscreen) {
+            psboxAPI.enterFullscreen();
+            console.log('✅ Pantalla completa vía API');
+            return;
+        }
+
+        // Método 2: API estándar del navegador
+        const element = document.documentElement;
+
+        if (element.requestFullscreen) {
+            element.requestFullscreen().then(() => {
+                console.log('✅ Pantalla completa exitosa (estándar)');
+            }).catch(err => {
+                console.log('❌ Error pantalla completa:', err);
+                this.fallbackFullscreen();
+            });
+        } else if (element.webkitRequestFullscreen) {
+            element.webkitRequestFullscreen();
+            console.log('✅ Pantalla completa exitosa (webkit)');
+        } else if (element.mozRequestFullScreen) {
+            element.mozRequestFullScreen();
+            console.log('✅ Pantalla completa exitosa (moz)');
+        } else {
+            this.fallbackFullscreen();
+        }
+    }
+
+    // 🔥 NUEVA: Fallback para pantalla completa
+    fallbackFullscreen() {
+        console.log('⚠️ Usando fallback para pantalla completa');
+
+        // Simular pantalla completa con CSS
+        document.body.style.position = 'fixed';
+        document.body.style.top = '0';
+        document.body.style.left = '0';
+        document.body.style.width = '100vw';
+        document.body.style.height = '100vh';
+        document.body.style.zIndex = '9999';
+
+        // Forcer redibujado
+        document.body.style.display = 'none';
+        setTimeout(() => {
+            document.body.style.display = 'block';
+        }, 50);
+    }
+    // 🔥 FUNCIÓN DE EMERGENCIA: Forzar restauración manual (por si acaso)
+    forceRestorePSBOX() {
+        console.log('🚨 ACTIVANDO RESTAURACIÓN DE EMERGENCIA');
+
+        // 1. Detener cualquier monitoreo
+        this.stopGameMonitoring();
+        this.currentRunningGame = null;
+
+        // 2. Restaurar visualmente
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+        document.body.style.pointerEvents = 'all';
+
+        // 3. Mostrar todos los elementos
+        document.querySelectorAll('.ps4-container, .carousel-container, .ps4-header')
+            .forEach(el => {
+                el.style.display = 'flex';
+                el.style.visibility = 'visible';
+                el.style.opacity = '1';
+            });
+
+        // 4. Forzar pantalla completa
+        setTimeout(() => {
+            this.enterFullscreen(true);
+        }, 200);
+
+        // 5. Notificación
+        this.showNotification('PSBOX Restaurado', 'Interfaz completamente restaurada', 'success');
+
+        console.log('✅ Restauración de emergencia completada');
+    }
+
+    setupEmergencyHotkeys() {
+        document.addEventListener('keydown', (e) => {
+            // Ctrl + Shift + R = Restauración de emergencia
+            if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+                e.preventDefault();
+                this.forceRestorePSBOX();
+            }
+
+            // F11 = Forzar pantalla completa
+            if (e.key === 'F11') {
+                e.preventDefault();
+                this.enterFullscreen(true);
+            }
+        });
+    }
+    // 🔥 PARTE 5: Minimizar correctamente
+    // 🔥 REEMPLAZAR LA FUNCIÓN COMPLETA minimizePSBOX
+    minimizePSBOX() {
+        console.log('📥 Minimizando PSBOX...');
+
+        // Asegurar que estamos en modo background
+        this.windowState = 'background';
+
+        // Método 1: Usar API si existe
+        if (window.psboxAPI && psboxAPI.minimizeToTray) {
+            // Usar método específico para minimizar a bandeja
+            psboxAPI.minimizeToTray().then(() => {
+                console.log('✅ PSBOX minimizado a bandeja');
+            }).catch(error => {
+                console.error('❌ Error minimizando:', error);
+                this.fallbackMinimize();
+            });
+        }
+        else if (window.psboxAPI && psboxAPI.minimizeWindow) {
+            // Usar método general de minimizar
+            psboxAPI.minimizeWindow().then(() => {
+                console.log('✅ PSBOX minimizado');
+            }).catch(error => {
+                console.error('❌ Error minimizando:', error);
+                this.fallbackMinimize();
+            });
+        }
+        else {
+            // Modo desarrollo: simular minimizado
+            this.fallbackMinimize();
+        }
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Minimizado alternativo
+    fallbackMinimize() {
+        console.log('🔄 Usando minimizado alternativo...');
+
+        // 1. Aplicar efectos visuales
+        document.body.classList.add('background-mode');
+        document.body.style.opacity = '0.3';
+        document.body.style.pointerEvents = 'none';
+
+        // 2. Reducir tamaño de ventana (simulación)
+        document.body.style.transform = 'scale(0.95)';
+        document.body.style.transition = 'all 0.5s ease';
+
+        // 3. Ocultar después de animación
+        setTimeout(() => {
+            // Solo ocultar completamente si sigue en background
+            if (this.windowState === 'background') {
+                document.body.style.display = 'none';
+                console.log('✅ PSBOX ocultado (simulación)');
+            }
+        }, 500);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Ocultar PSBOX completamente
+    hidePSBOX() {
+        if (window.psboxAPI && psboxAPI.hideWindow) {
+            psboxAPI.hideWindow(); // ✅ Esto es lo que se usa en producción
+        } else {
+            // 🔥 SOLO en desarrollo: ocultar PSBOX
+            document.body.style.display = 'none';
+            console.log('PSBOX ocultado (simulación en desarrollo)');
+            // 🚫 NO mostrar botón manual aquí
+        }
+    }
+
+    // 🔥 MODIFICA restorePSBOXWindow para mostrar completamente
+    // 🔥 PARTE 2: Restauración mejorada
+    restorePSBOX() {
+        console.log('🔄 Restaurando ventana PSBOX...');
+
+        // Actualizar estado
+        this.windowState = 'foreground';
+
+        if (window.psboxAPI && psboxAPI.restoreWindow) {
+            // Usar API oficial
+            psboxAPI.restoreWindow().then(() => {
+                console.log('✅ Ventana restaurada vía API');
+
+                // Forzar visibilidad después de restaurar
+                setTimeout(() => {
+                    document.body.classList.remove('background-mode');
+                    document.body.style.opacity = '1';
+                    document.body.style.pointerEvents = 'all';
+                }, 200);
+
+            }).catch(error => {
+                console.error('❌ Error restaurando ventana:', error);
+                this.fallbackRestore();
+            });
+        } else {
+            // Modo desarrollo: restauración visual
+            console.log('🔄 Modo desarrollo: Restauración visual');
+            this.fallbackRestore();
+        }
+    }
+
+    // 🔥 NUEVA: Restauración de emergencia
+    fallbackRestore() {
+        console.log('🛠️ Usando restauración de emergencia...');
+
+        // Remover efectos de fondo
+        document.body.classList.remove('background-mode');
+
+        // Restaurar visibilidad completa
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+        document.body.style.pointerEvents = 'all';
+
+        // Asegurar que todos los elementos estén visibles
+        document.querySelectorAll('.ps4-container, .carousel-container, .ps4-header, .carousel-track')
+            .forEach(el => {
+                el.style.display = '';
+                el.style.visibility = 'visible';
+                el.style.opacity = '1';
+            });
+
+        console.log('✅ Restauración visual completada');
+    }
+
+    // 🔥 PARTE 3: Pantalla de carga mejorada
+    showLoadingScreen(game) {
+        this.isLoading = true;
+        this.currentLoadingGame = game;
+        this.loadingProgress = 0;
+
+        const loadingScreen = document.getElementById('loadingScreen');
+        const loadingFullscreenCover = document.getElementById('loadingFullscreenCover');
+        const loadingTitle = document.getElementById('loadingGameTitle');
+        const loadingText = document.getElementById('loadingText');
+        const progressBar = document.getElementById('loadingProgress');
+
+        // 🔥 Título con nombre del juego
+        loadingTitle.textContent = game.name;
+        loadingText.textContent = 'Inicializando sistema...';
+        progressBar.style.width = '0%';
+
+        // 🔥 LIMPIAR contenido anterior
+        loadingFullscreenCover.style.backgroundImage = '';
+
+        // 🔥 PRIORIDAD: 1) Imagen de carga, 2) Portada del juego, 3) Fondo por defecto
+        if (game.loadingImage && (game.loadingImage.startsWith('data:') || game.loadingImage.startsWith('http'))) {
+            loadingFullscreenCover.style.backgroundImage = `url('${game.loadingImage}')`;
+            console.log('✅ Usando imagen de carga personalizada');
+        } else if (game.cover && (game.cover.startsWith('data:') || game.cover.startsWith('http'))) {
+            loadingFullscreenCover.style.backgroundImage = `url('${game.cover}')`;
+            console.log('✅ Usando portada del juego');
+        } else {
+            // 🔥 Fondo por defecto PS4
+            loadingFullscreenCover.style.backgroundImage = `
+            linear-gradient(135deg, 
+                rgba(0, 102, 204, 0.8), 
+                rgba(0, 168, 255, 0.6),
+                rgba(0, 119, 204, 0.7)
+            )
+        `;
+            console.log('✅ Usando fondo por defecto');
+        }
+
+        // 🔥 Forzar que la imagen cubra toda la pantalla
+        loadingFullscreenCover.style.backgroundSize = 'cover';
+        loadingFullscreenCover.style.backgroundPosition = 'center';
+        loadingFullscreenCover.style.backgroundRepeat = 'no-repeat';
+
+        // 🔥 Mostrar pantalla
+        loadingScreen.classList.add('active');
+
+        // 🔥 Iniciar progreso animado
+        this.startLoadingProgress();
+
+        console.log('🔄 Pantalla de carga activada para:', game.name);
+    }
+
+    // 🔥 PARTE 4: Progreso de carga mejorado
+    startLoadingProgress() {
+        if (this.loadingInterval) {
+            clearInterval(this.loadingInterval);
+        }
+
+        this.loadingProgress = 0;
+        const progressBar = document.getElementById('loadingProgress');
+        const loadingText = document.getElementById('loadingText');
+
+        // 🔥 Etapas realistas de carga
+        const stages = [
+            { progress: 20, text: 'Inicializando sistema...' },
+            { progress: 40, text: 'Cargando recursos del juego...' },
+            { progress: 60, text: 'Preparando entorno de ejecución...' },
+            { progress: 80, text: 'Verificando compatibilidad...' },
+            { progress: 90, text: 'Iniciando juego...' }
+        ];
+
+        let currentStage = 0;
+
+        this.loadingInterval = setInterval(() => {
+            // 🔥 Progreso más rápido al inicio, más lento al final
+            let increment;
+            if (this.loadingProgress < 30) {
+                increment = 2 + Math.random() * 3; // Rápido
+            } else if (this.loadingProgress < 70) {
+                increment = 1 + Math.random() * 2; // Medio
+            } else {
+                increment = 0.5 + Math.random(); // Lento al final
+            }
+
+            this.loadingProgress += increment;
+
+            // 🔥 Actualizar barra de progreso
+            if (progressBar) {
+                progressBar.style.width = this.loadingProgress + '%';
+            }
+
+            // 🔥 Cambiar texto según etapa
+            if (loadingText && currentStage < stages.length) {
+                if (this.loadingProgress >= stages[currentStage].progress) {
+                    loadingText.textContent = stages[currentStage].text;
+                    currentStage++;
+                }
+            }
+
+            // 🔥 Detener al 100%
+            if (this.loadingProgress >= 100) {
+                this.loadingProgress = 100;
+                if (progressBar) {
+                    progressBar.style.width = '100%';
+                }
+                clearInterval(this.loadingInterval);
+            }
+
+        }, 100); // 🔥 Actualizar cada 100ms (más suave)
+    }
+
+    hideLoadingScreen() {
+        console.log('🔄 Ocultando pantalla de carga...');
+
+        clearInterval(this.loadingInterval);
+        this.loadingInterval = null;
+
+        const progressBar = document.getElementById('loadingProgress');
+        if (progressBar) {
+            progressBar.style.width = '100%';
+        }
+
+        const loadingScreen = document.getElementById('loadingScreen');
+        if (loadingScreen) {
+            loadingScreen.classList.remove('active');
+        }
+
+        // 🔥 Solo resetear isLoading después de un delay
+        setTimeout(() => {
+            this.isLoading = false;
+            this.currentLoadingGame = null;
+            this.loadingProgress = 0;
+            console.log('✅ Pantalla de carga oculta y estado reseteado');
+        }, 500);
+    }
+
+    // 🔥 PARTE 6: Cancelar carga mejorado
+    cancelLoading() {
+        console.log('⏹️ Cancelando carga...');
+
+        // Detener intervalo de progreso
+        if (this.loadingInterval) {
+            clearInterval(this.loadingInterval);
+            this.loadingInterval = null;
+        }
+
+        // Resetear estado
+        this.isLoading = false;
+        this.currentLoadingGame = null;
+        this.loadingProgress = 0;
+
+        // Ocultar pantalla de carga
+        const loadingScreen = document.getElementById('loadingScreen');
+        if (loadingScreen) {
+            loadingScreen.classList.remove('active');
+        }
+
+        // Resetear barra de progreso
+        const progressBar = document.getElementById('loadingProgress');
+        if (progressBar) {
+            progressBar.style.width = '0%';
+        }
+
+        // Mostrar notificación
+        this.showNotification('Cancelado', 'Inicio del juego cancelado', 'info');
+
+        console.log('✅ Carga cancelada');
+    }
+    // ===== QUICK MENU =====
+    setupQuickMenu() {
+        this.quickMenuItems = [
+            { icon: '✕', label: 'Iniciar Juego Seleccionado', action: () => this.launchSelectedGame() },
+            { icon: '✎', label: 'Editar Juego', action: () => this.editSelectedGame() },
+            { icon: '🗑️', label: 'Eliminar Juego', action: () => this.removeSelectedGame() },
+            { icon: '🔄', label: 'Cambiar Modo de Control', action: () => this.toggleControlMode() },
+            { icon: '🎮', label: 'Desconectar Mando', action: () => this.disconnectController() },
+            { icon: '🔴', label: 'Cerrar PSBOX', action: () => this.closePSBOX() },
+            { icon: '❌', label: 'Cerrar Menú', action: () => this.closeQuickMenu() }
+        ];
+
+        this.renderQuickMenu();
+    }
+
+    renderQuickMenu() {
+        const quickMenuItems = document.getElementById('quickMenuItems');
+        if (!quickMenuItems) return;
+
+        quickMenuItems.innerHTML = '';
+
+        this.quickMenuItems.forEach((item, index) => {
+            const itemElement = document.createElement('div');
+            itemElement.className = 'quick-menu-item';
+            itemElement.dataset.index = index;
+
+            // 🔧 Marcar como seleccionado
+            if (index === this.quickMenuSelectedIndex) {
+                itemElement.classList.add('selected');
+                itemElement.style.background = 'rgba(0, 102, 204, 0.4)';
+                itemElement.style.borderColor = '#00a8ff';
+                itemElement.style.transform = 'translateX(5px)';
+            }
+
+            itemElement.innerHTML = `
+            <div class="menu-item-icon">${item.icon}</div>
+            <div class="menu-item-label">${item.label}</div>
+        `;
+
+            itemElement.addEventListener('click', () => {
+                item.action();
+            });
+
+            quickMenuItems.appendChild(itemElement);
+        });
+    }
+
+    navigateQuickMenuUp() {
+        if (!this.isInQuickMenu || this.quickMenuItems.length === 0) return;
+
+        if (this.quickMenuSelectedIndex > 0) {
+            this.quickMenuSelectedIndex--;
+        } else {
+            this.quickMenuSelectedIndex = this.quickMenuItems.length - 1; // Circular
+        }
+        this.renderQuickMenu();
+    }
+
+    navigateQuickMenuDown() {
+        if (!this.isInQuickMenu || this.quickMenuItems.length === 0) return;
+
+        if (this.quickMenuSelectedIndex < this.quickMenuItems.length - 1) {
+            this.quickMenuSelectedIndex++;
+        } else {
+            this.quickMenuSelectedIndex = 0; // Circular
+        }
+        this.renderQuickMenu();
+    }
+
+    selectQuickMenuItem() {
+        if (!this.isInQuickMenu) return;
+
+        const item = this.quickMenuItems[this.quickMenuSelectedIndex];
+        if (item && item.action) {
+            this.closeQuickMenu();
+            setTimeout(() => item.action(), 100); // Pequeño delay para que se cierre primero
+        }
+    }
+
+    launchSelectedGame() {
+        if (this.currentCenterIndex < 2 || this.games.length === 0 || this.isLoading) return;
+
+        const gameIndex = this.currentCenterIndex - 2;
+        const game = this.games[gameIndex];
+        if (game) {
+            this.launchGame(game);
+        }
+    }
+
+    editSelectedGame() {
+        if (this.currentCenterIndex < 2 || this.games.length === 0) {
+            this.showNotification('Error', 'Selecciona un juego primero', 'error');
+            return;
+        }
+
+        const gameIndex = this.currentCenterIndex - 2;
+        const game = this.games[gameIndex];
+
+        // 🔥 NUEVO: Abrir modal de edición real
+        this.openEditGameModal(game);
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Abrir modal de edición
+    openEditGameModal(game) {
+        this.isInModal = true;
+        this.currentEditingGame = game;
+
+        // Crear o mostrar modal de edición
+        let editModal = document.getElementById('editGameModal');
+
+        if (!editModal) {
+            // Crear modal dinámicamente
+            editModal = document.createElement('div');
+            editModal.id = 'editGameModal';
+            editModal.className = 'modal-overlay';
+            editModal.innerHTML = `
+            <div class="ps4-modal" style="width: 600px;">
+                <div class="modal-header">
+                    <div class="modal-title">Editar Juego: ${game.name}</div>
+                </div>
+                
+                <div class="modal-content">
+                    <div class="form-group">
+                        <label class="form-label">
+                            <span class="form-label-icon">📝</span>
+                            Nombre del Juego
+                        </label>
+                        <input type="text" class="form-input" id="editGameName" value="${game.name}" autocomplete="off">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">
+                            <span class="form-label-icon">📁</span>
+                            Ejecutable del Juego
+                        </label>
+                        <input type="text" class="form-input" id="editGamePath" value="${game.path}" readonly>
+                        <button class="browse-button" onclick="editBrowseForGame()">
+                            <span>🔍</span>
+                            <span>Cambiar Ejecutable</span>
+                        </button>
+                    </div>
+                    
+                    <div class="images-section">
+                        <div class="image-option">
+                            <label class="form-label">
+                                <span class="form-label-icon">🖼️</span>
+                                Portada del Juego
+                            </label>
+                            <div class="image-preview" onclick="editBrowseForCover()" id="editCoverPreview">
+                                ${game.cover ? `<img src="${game.cover}" alt="${game.name}">` :
+                    '<div class="preview-placeholder"><i>📷</i><div>Haz clic para cambiar</div></div>'}
+                            </div>
+                            <div class="preview-title">Portada (800x450px recomendado)</div>
+                            <input type="file" id="editCoverFile" accept="image/*" style="display: none;">
+                        </div>
+                        
+                        <div class="image-option">
+                            <label class="form-label">
+                                <span class="form-label-icon">⏳</span>
+                                Imagen de Carga (Opcional)
+                            </label>
+                            <div class="image-preview" onclick="editBrowseForLoadingImage()" id="editLoadingImagePreview">
+                                ${game.loadingImage ? `<img src="${game.loadingImage}" alt="${game.name}">` :
+                    '<div class="preview-placeholder"><i>🔄</i><div>Haz clic para cambiar</div></div>'}
+                            </div>
+                            <div class="preview-title">Pantalla de carga (1920x1080px recomendado)</div>
+                            <input type="file" id="editLoadingImageFile" accept="image/*" style="display: none;">
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="modal-actions">
+                    <button class="browse-button" style="background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.3);" onclick="closeEditGameModal()">
+                        Cancelar
+                    </button>
+                    <button class="browse-button" onclick="saveEditedGame()">
+                        Guardar Cambios
+                    </button>
+                    <button class="browse-button" style="background: rgba(255,55,95,0.3); border-color: #ff375f;" onclick="deleteCurrentGame()">
+                        Eliminar Juego
+                    </button>
+                </div>
+            </div>
+        `;
+            document.body.appendChild(editModal);
+
+            // Configurar eventos de archivos
+            document.getElementById('editCoverFile').addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const preview = document.getElementById('editCoverPreview');
+                        preview.innerHTML = `<img src="${event.target.result}" alt="Vista previa">`;
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+
+            document.getElementById('editLoadingImageFile').addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const preview = document.getElementById('editLoadingImagePreview');
+                        preview.innerHTML = `<img src="${event.target.result}" alt="Vista previa">`;
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+
+        editModal.classList.add('active');
+        document.body.classList.add('keyboard-mode');
+    }
+
+    // 🔥 NUEVA FUNCIÓN: Cerrar modal de edición
+    closeEditGameModal() {
+        this.isInModal = false;
+        this.currentEditingGame = null;
+        const editModal = document.getElementById('editGameModal');
+        if (editModal) {
+            editModal.classList.remove('active');
+        }
+
+        // Restaurar modo anterior
+        if (this.controlMode === 'gamepad') {
+            document.body.classList.remove('keyboard-mode');
+            document.body.classList.add('gamepad-mode');
+        }
+    }
+
+    removeSelectedGame() {
+        // No permitir borrar Configuración ni Agregar
+        if (this.currentCenterIndex < 2 || this.games.length === 0) {
+            this.showNotification(
+                'Error',
+                'Selecciona un juego primero',
+                'error'
+            );
+            return;
+        }
+
+        const gameIndex = this.currentCenterIndex - 2;
+        const game = this.games[gameIndex];
+        if (!game) return;
+
+        // 🔹 Eliminar juego
+        this.games.splice(gameIndex, 1);
+
+        // 🔹 Recalcular estado
+        this.totalCarouselItems = 2 + this.games.length;
+
+        if (this.currentCenterIndex >= this.totalCarouselItems) {
+            this.currentCenterIndex = this.totalCarouselItems - 1;
+        }
+        if (this.currentCenterIndex < 0) {
+            this.currentCenterIndex = 0;
+        }
+
+        // 🔹 Render y guardar UNA sola vez
+        this.renderCarousel();
+        this.saveConfig();
+
+        // 🔹 Notificación con undo
+        this.showNotificationWithUndo(
+            `${game.name} eliminado`,
+            'El juego ha sido eliminado',
+            'success',
+            () => {
+                // 🔄 Restaurar juego
+                this.games.splice(gameIndex, 0, game);
+
+                this.totalCarouselItems = 2 + this.games.length;
+                this.currentCenterIndex = gameIndex + 2;
+
+                this.renderCarousel();
+                this.saveConfig();
+
+                this.showNotification(
+                    'Deshecho',
+                    `${game.name} restaurado`,
+                    'success'
+                );
+            }
+        );
+    }
+
+
+    // 🔥 NUEVA FUNCIÓN: Notificación con opción de deshacer
+    showNotificationWithUndo(title, message, type, undoCallback) {
+        const notification = document.getElementById('notification');
+        const icon = document.getElementById('notificationIcon');
+        const titleEl = document.getElementById('notificationTitle');
+        const messageEl = document.getElementById('notificationMessage');
+
+        notification.className = 'notification';
+        notification.classList.add(`notification-${type}`);
+
+        // Agregar botón de deshacer
+        notification.innerHTML = `
+        <div class="notification-icon" id="notificationIcon">${type === 'success' ? '✅' : 'ℹ️'}</div>
+        <div class="notification-title" id="notificationTitle">${title}</div>
+        <div class="notification-message" id="notificationMessage">${message}</div>
+        <button class="undo-button" id="undoButton" style="
+            margin-top: 10px;
+            padding: 5px 10px;
+            background: rgba(0, 168, 255, 0.3);
+            border: 1px solid #00a8ff;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            font-size: 12px;
+        ">Deshacer</button>
+    `;
+
+        notification.classList.add('show');
+
+        // Configurar evento del botón de deshacer
+        setTimeout(() => {
+            const undoButton = document.getElementById('undoButton');
+            if (undoButton) {
+                undoButton.addEventListener('click', () => {
+                    notification.classList.remove('show');
+                    if (undoCallback) undoCallback();
+                });
+            }
+        }, 10);
+
+        // Cerrar automáticamente después de 5 segundos
+        setTimeout(() => {
+            if (notification.classList.contains('show')) {
+                notification.classList.remove('show');
+            }
+        }, 5000);
+    }
+
+    // ===== GAMEPAD =====
+    initGamepad() {
+        window.addEventListener('gamepadconnected', (e) => {
+            console.log('🎮 Mando conectado:', e.gamepad.id);
+            this.gamepads.push(e.gamepad);
+            this.activeGamepad = e.gamepad;
+
+            // 🆕 Cambiar a modo gamepad al conectar mando
+            this.setGamepadMode();
+            this.resetInactivityTimer();
+
+            this.showNotification('Mando conectado', e.gamepad.id, 'success');
+            this.startGamepadPolling();
+        });
+
+        window.addEventListener('gamepaddisconnected', (e) => {
+            console.log('🎮 Mando desconectado:', e.gamepad.id);
+            this.gamepads = this.gamepads.filter(gp => gp.id !== e.gamepad.id);
+            this.activeGamepad = this.gamepads.length > 0 ? this.gamepads[0] : null;
+
+            // 🆕 Si no hay más mandos, iniciar timer de inactividad
+            if (this.gamepads.length === 0) {
+                this.startInactivityTimer();
+            }
+
+            this.showNotification('Mando desconectado', 'El mando se ha desconectado', 'info');
+        });
+
+        if (navigator.getGamepads) {
+            const gamepads = navigator.getGamepads();
+            gamepads.forEach(gp => {
+                if (gp) {
+                    this.gamepads.push(gp);
+                    if (!this.activeGamepad) {
+                        this.activeGamepad = gp;
+                    }
+                }
+            });
+        }
+
+        if (this.gamepads.length > 0) {
+            this.setGamepadMode();
+            this.startGamepadPolling();
+        } else {
+            // 🆕 Si no hay gamepad, iniciar timer
+            this.startInactivityTimer();
+        }
+    }
+
+    startGamepadPolling() {
+        if (this.isPolling) return; // 🛡️ Prevent multiple loops
+        this.isPolling = true;
+
+        const poll = () => {
+            if (!this.activeGamepad || this.controlMode !== 'gamepad') {
+                this.isPolling = false;
+                return;
+            }
+
+            const gamepads = navigator.getGamepads();
+            const gp = gamepads[this.activeGamepad.index];
+
+            if (gp) {
+                try {
+                    this.processGamepadInput(gp);
+                } catch (e) {
+                    console.error("Gamepad Error:", e);
+                }
+            }
+
+            requestAnimationFrame(poll);
+        };
+
+        poll();
+    }
+
+    showLoadingScreen(game) {
+        this.isLoading = true;
+        this.currentLoadingGame = game;
+        this.loadingProgress = 0;
+
+        const loadingScreen = document.getElementById('loadingScreen');
+        const loadingCover = document.getElementById('loadingGameCover');
+        const loadingFullscreenCover = document.getElementById('loadingFullscreenCover');
+        const loadingTitle = document.getElementById('loadingGameTitle');
+        const loadingText = document.getElementById('loadingText');
+        const progressBar = document.getElementById('loadingProgress');
+
+        loadingTitle.textContent = game.name;
+        loadingText.textContent = 'Preparando el juego...';
+        progressBar.style.width = '0%';
+
+        // Limpiar contenido anterior
+        loadingCover.innerHTML = '';
+        loadingFullscreenCover.style.backgroundImage = '';
+
+        // Primero usar imagen de carga, luego portada
+        if (game.loadingImage && game.loadingImage.startsWith('data:')) {
+            loadingCover.innerHTML = `<img src="${game.loadingImage}" alt="${game.name}">`;
+            loadingFullscreenCover.style.backgroundImage = `url('${game.loadingImage}')`;
+        } else if (game.cover && game.cover.startsWith('data:')) {
+            loadingCover.innerHTML = `<img src="${game.cover}" alt="${game.name}">`;
+            loadingFullscreenCover.style.backgroundImage = `url('${game.cover}')`;
+        } else {
+            const icon = document.createElement('div');
+            icon.className = 'game-icon';
+            icon.textContent = '🎮';
+            icon.style.fontSize = '120px';
+            icon.style.color = 'rgba(255, 255, 255, 0.6)';
+            loadingCover.appendChild(icon);
+        }
+
+        loadingScreen.classList.add('active');
+        this.startLoadingProgress();
+    }
+    /* 🔧 REEMPLAZA processGamepadInput COMPLETO */
+
+    // 🔥 REEMPLAZA COMPLETAMENTE processGamepadInput CON ESTO:
+    processGamepadInput(gamepad) {
+        const buttons = gamepad.buttons;
+        const axes = gamepad.axes;
+        const deadzone = 0.5;
+        const leftX = Math.abs(axes[0]) > deadzone ? axes[0] : 0;
+        const leftY = Math.abs(axes[1]) > deadzone ? axes[1] : 0;
+
+        // Control de tiempo para polling
+        const now = Date.now();
+
+        // Inicializar propiedades si no existen (safety check)
+        if (!this.dpadHoldStart) this.dpadHoldStart = { left: 0, right: 0, up: 0, down: 0 };
+        if (!this.currentSpeed) this.currentSpeed = { left: this.maxSpeed, right: this.maxSpeed, up: this.maxSpeed, down: this.maxSpeed };
+        if (!this.gamepadDelay) this.gamepadDelay = this.maxSpeed;
+
+        // Verificar delay general
+        if (this.lastGamepadUpdate && (now - this.lastGamepadUpdate < this.gamepadDelay)) {
+            return;
+        }
+
+        // 🔥 CRÍTICO: Si por alguna razón isAnimating se quedó pegado, liberarlo
+        if (this.isAnimating) {
+            this.isAnimating = false;
+        }
+
+        // 1. GESTIÓN DEL QUICK MENU (Prioridad alta)
+        // Botón Options (usualmente botón 9 o start)
+        if (buttons[9] && buttons[9].pressed) {
+            if (!this.optionsPressed) {
+                if (this.isQuickMenuOpen) {
+                    this.closeQuickMenu();
+                } else {
+                    this.openQuickMenu();
+                }
+                this.optionsPressed = true;
+                this.lastGamepadUpdate = now;
+            }
+            return; // Detener otro procesamiento si se presiona options
+        } else {
+            this.optionsPressed = false;
+        }
+
+        // 2. NAVEGACIÓN EN QUICK MENU
+        if (this.isInQuickMenu) {
+            // Arriba
+            if (leftY < -0.5 || (buttons[12] && buttons[12].pressed)) {
+                if (!this.dpadUpPressed) {
+                    this.navigateQuickMenuUp();
+                    this.dpadUpPressed = true;
+                    this.lastGamepadUpdate = now;
+                    this.gamepadDelay = 200; // Delay fijo para menú
+                }
+            } else {
+                this.dpadUpPressed = false;
+            }
+
+            // Abajo
+            if (leftY > 0.5 || (buttons[13] && buttons[13].pressed)) {
+                if (!this.dpadDownPressed) {
+                    this.navigateQuickMenuDown();
+                    this.dpadDownPressed = true;
+                    this.lastGamepadUpdate = now;
+                    this.gamepadDelay = 200;
+                }
+            } else {
+                this.dpadDownPressed = false;
+            }
+
+            // Aceptar (X / A)
+            if (buttons[0] && buttons[0].pressed && !this.buttonAPressed) {
+                this.selectQuickMenuItem();
+                this.buttonAPressed = true;
+                this.lastGamepadUpdate = now;
+            } else if (!buttons[0] || !buttons[0].pressed) {
+                this.buttonAPressed = false;
+            }
+
+            // Atrás (O / B)
+            if (buttons[1] && buttons[1].pressed && !this.buttonBPressed) {
+                this.closeQuickMenu();
+                this.buttonBPressed = true;
+                this.lastGamepadUpdate = now;
+            } else if (!buttons[1] || !buttons[1].pressed) {
+                this.buttonBPressed = false;
+            }
+
+            return;
+        }
+
+        // 3. NAVEGACIÓN EN MODALES (Configuración / Agregar Juego)
+        if (this.isInModal) {
+            // Arriba
+            if (leftY < -0.5 || (buttons[12] && buttons[12].pressed)) {
+                if (!this.dpadUpPressed) {
+                    this.configNavigateUp(); // Función que definimos antes
+                    this.dpadUpPressed = true;
+                    this.lastGamepadUpdate = now;
+                    this.gamepadDelay = 150;
+                }
+            } else {
+                this.dpadUpPressed = false;
+            }
+
+            // Abajo
+            if (leftY > 0.5 || (buttons[13] && buttons[13].pressed)) {
+                if (!this.dpadDownPressed) {
+                    this.configNavigateDown(); // Función que definimos antes
+                    this.dpadDownPressed = true;
+                    this.lastGamepadUpdate = now;
+                    this.gamepadDelay = 150;
+                }
+            } else {
+                this.dpadDownPressed = false;
+            }
+
+            // Aceptar (X / A)
+            if (buttons[0] && buttons[0].pressed && !this.buttonAPressed) {
+                this.configPerformAction(); // Función que definimos antes
+                this.buttonAPressed = true;
+                this.lastGamepadUpdate = now;
+            } else if (!buttons[0] || !buttons[0].pressed) {
+                this.buttonAPressed = false;
+            }
+
+            // Atrás/Cerrar (O / B)
+            if (buttons[1] && buttons[1].pressed && !this.buttonBPressed) {
+                this.closeCurrentModal();
+                this.buttonBPressed = true;
+                this.lastGamepadUpdate = now;
+            } else if (!buttons[1] || !buttons[1].pressed) {
+                this.buttonBPressed = false;
+            }
+
+            return;
+        }
+
+        // 4. NAVEGACIÓN PRINCIPAL (CARRUSEL)
+        if (!this.isLoading) {
+
+            // === IZQUIERDA ===
+            if (leftX < -0.5 || (buttons[14] && buttons[14].pressed)) {
+                if (!this.dpadLeftPressed) {
+                    // Primer toque
+                    this.navigateCarousel(-1);
+                    this.dpadLeftPressed = true;
+                    this.dpadHoldStart.left = now;
+                    this.currentSpeed.left = this.maxSpeed; // Empezar lento (300ms)
+                    this.gamepadDelay = this.currentSpeed.left; // Configurar delay para el siguiente frame
+                    this.lastGamepadUpdate = now;
+                } else {
+                    // Manteniendo presionado (Hold)
+                    const holdTime = now - this.dpadHoldStart.left;
+
+                    // Si hemos superado el umbral para acelerar o ya hemos procesado un paso con la velocidad actual
+                    if (holdTime > this.holdThreshold) {
+                        // Acelerar: Reducir el delay
+                        this.currentSpeed.left = Math.max(this.minSpeed, this.currentSpeed.left * this.acceleration);
+                    }
+
+                    // Verificar si ya toca mover de nuevo según la velocidad actual
+                    if (now - this.lastGamepadUpdate >= this.currentSpeed.left) {
+                        this.navigateCarousel(-1);
+                        this.lastGamepadUpdate = now;
+                        // El delay para la próxima vez será la velocidad actual (que puede haber cambiado)
+                        this.gamepadDelay = this.currentSpeed.left;
+                    }
+                }
+            } else {
+                // Soltar
+                this.dpadLeftPressed = false;
+                this.dpadHoldStart.left = 0;
+                this.currentSpeed.left = this.maxSpeed;
+            }
+
+            // === DERECHA ===
+            if (leftX > 0.5 || (buttons[15] && buttons[15].pressed)) {
+                if (!this.dpadRightPressed) {
+                    // Primer toque
+                    this.navigateCarousel(1);
+                    this.dpadRightPressed = true;
+                    this.dpadHoldStart.right = now;
+                    this.currentSpeed.right = this.maxSpeed;
+                    this.gamepadDelay = this.currentSpeed.right;
+                    this.lastGamepadUpdate = now;
+                } else {
+                    // Manteniendo presionado
+                    const holdTime = now - this.dpadHoldStart.right;
+
+                    if (holdTime > this.holdThreshold) {
+                        this.currentSpeed.right = Math.max(this.minSpeed, this.currentSpeed.right * this.acceleration);
+                    }
+
+                    if (now - this.lastGamepadUpdate >= this.currentSpeed.right) {
+                        this.navigateCarousel(1);
+                        this.lastGamepadUpdate = now;
+                        this.gamepadDelay = this.currentSpeed.right;
+                    }
+                }
+            } else {
+                // Soltar
+                this.dpadRightPressed = false;
+                this.dpadHoldStart.right = 0;
+                this.currentSpeed.right = this.maxSpeed;
+            }
+
+            // Aceptar (X / A)
+            if (buttons[0] && buttons[0].pressed && !this.buttonAPressed) {
+                this.performSimpleAction();
+                this.buttonAPressed = true;
+                this.lastGamepadUpdate = now;
+            } else if (!buttons[0] || !buttons[0].pressed) {
+                this.buttonAPressed = false;
+            }
+        }
+    }
+    // 🔥 NUEVA FUNCIÓN SIMPLE PARA ACCIONES
+    performSimpleAction() {
+        if (this.isLoading) return;
+
+        if (this.isInQuickMenu) {
+            this.selectQuickMenuItem();
+            return;
+        }
+
+        if (this.isInModal) return;
+
+        // Determinar qué item está seleccionado
+        if (this.currentCenterIndex === 0) {
+            this.openConfigModal();
+        } else if (this.currentCenterIndex === 1) {
+            this.openAddGameModal();
+        } else {
+            const gameIndex = this.currentCenterIndex - 2;
+            if (gameIndex >= 0 && gameIndex < this.games.length) {
+                const game = this.games[gameIndex];
+                this.launchGame(game);
+            } else {
+                console.error('❌ Index out of bounds:', this.currentCenterIndex);
+            }
+        }
+    }
+    // ===== MODALES =====
+    openAddGameModal() {
+        const btn = document.getElementById('saveGameBtn');
+
+        btn.onclick = () => {
+            this.addNewGame();
+        };
+    }
+
+    openConfigModal() {
+        this.isInModal = true;
+        document.body.classList.add('keyboard-mode');
+        document.getElementById('configModal').classList.add('active');
+        this.updateControlModeText();
+
+        this.updateControlModeText();
+
+        // 🔧 Configurar navegación inmediatamente
+        this.setupConfigNavigation();
+    }
+
+    closeConfigModal() {
+        this.isInModal = false;
+        document.getElementById('configModal').classList.remove('active');
+
+        if (this.controlMode === 'gamepad') {
+            this.setGamepadMode();
+        }
+
+        // 🔥 Forzar actualización visual inmediata
+        requestAnimationFrame(() => {
+            this.updateCarouselPositions();
+            // Double force for safety
+            setTimeout(() => this.updateCarouselPositions(), 50);
+        });
+    }
+
+    openQuickMenu() {
+        if (this.isQuickMenuOpen || this.isInModal || this.isLoading) return;
+
+        this.isQuickMenuOpen = true;
+        this.isInQuickMenu = true;
+        this.quickMenuSelectedIndex = 0;
+        this.renderQuickMenu();
+
+        document.getElementById('quickMenu').classList.add('active');
+        document.getElementById('quickMenuOverlay').classList.add('active');
+
+        // 🔧 Asegurar que Quick Menu tenga foco para navegación
+        setTimeout(() => {
+            const quickMenu = document.getElementById('quickMenu');
+            if (quickMenu) {
+                quickMenu.focus();
+            }
+        }, 50);
+    }
+
+    closeQuickMenu() {
+        this.isQuickMenuOpen = false;
+        this.isInQuickMenu = false;
+        this.quickMenuSelectedIndex = 0;
+
+        document.getElementById('quickMenu').classList.remove('active');
+        document.getElementById('quickMenuOverlay').classList.remove('active');
+    }
+
+    openAddGameModal() {
+        this.isInModal = true;
+        // 🆕 Activar cursor temporalmente en modal
+        document.body.classList.add('keyboard-mode');
+        document.getElementById('addGameModal').classList.add('active');
+        document.getElementById('gameName').focus();
+    }
+
+    closeAddGameModal() {
+        this.isInModal = false;
+        document.getElementById('addGameModal').classList.remove('active');
+        this.resetAddForm();
+
+        if (this.controlMode === 'gamepad') {
+            document.body.classList.remove('keyboard-mode');
+            document.body.classList.add('gamepad-mode');
+            document.body.style.cursor = 'none';
+        }
+    }
+
+    closeCurrentModal() {
+        if (document.getElementById('configModal').classList.contains('active')) {
+            this.closeConfigModal();
+        } else if (document.getElementById('addGameModal').classList.contains('active')) {
+            this.closeAddGameModal();
+        }
+    }
+
+    resetAddForm() {
+        document.getElementById('gameName').value = '';
+        document.getElementById('gamePath').value = '';
+        document.getElementById('coverPreview').innerHTML = `
+                    <div class="preview-placeholder">
+                        <i>📷</i>
+                        <div>Haz clic para seleccionar</div>
+                    </div>
+                `;
+        document.getElementById('loadingImagePreview').innerHTML = `
+                    <div class="preview-placeholder">
+                        <i>🔄</i>
+                        <div>Haz clic para seleccionar</div>
+                    </div>
+                `;
+        document.getElementById('coverFile').value = '';
+        document.getElementById('loadingImageFile').value = '';
+    }
+    // 🔥 PARTE 4: Agregar función de restauración manual (para emergencias)
+    forceAutoRestore() {
+        console.log('🚨 ACTIVANDO RESTAURACIÓN MANUAL DE EMERGENCIA');
+
+        // Forzar que el monitoreo detecte el cambio
+        this.gameWasHidden = true;
+        this.restoreAttempted = false;
+
+        // Simular que PSBOX ahora es visible
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.classList.remove('background-mode');
+
+        // Forzar eventos
+        document.dispatchEvent(new Event('visibilitychange'));
+        window.dispatchEvent(new Event('focus'));
+
+        // También llamar directamente a onGameClosed
+        setTimeout(() => {
+            if (this.currentRunningGame) {
+                console.log('🔄 Forzando onGameClosed...');
+                this.onGameClosed();
+            } else {
+                console.log('🔄 Forzando restauración completa...');
+                this.performRestorationSequence('(Restauración manual)');
+            }
+        }, 300);
+    }
+    setupImageEvents() {
+        const coverFile = document.getElementById('coverFile');
+        const loadingImageFile = document.getElementById('loadingImageFile');
+
+        if (coverFile) {
+            coverFile.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const preview = document.getElementById('coverPreview');
+                        preview.innerHTML = '';
+                        preview.style.backgroundImage = `url('${e.target.result}')`;
+                        preview.style.backgroundSize = 'cover';
+                        preview.style.backgroundPosition = 'center';
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+
+        if (loadingImageFile) {
+            loadingImageFile.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const preview = document.getElementById('loadingImagePreview');
+                        preview.innerHTML = '';
+                        preview.style.backgroundImage = `url('${e.target.result}')`;
+                        preview.style.backgroundSize = 'cover';
+                        preview.style.backgroundPosition = 'center';
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+    }
+
+    // ===== AGREGAR JUEGO =====
+    async addNewGame() {
+        const name = document.getElementById('gameName').value.trim();
+        const path = document.getElementById('gamePath').value.trim();
+        const coverFile = document.getElementById('coverFile').files[0];
+        const loadingImageFile = document.getElementById('loadingImageFile').files[0];
+        if (!name || !path) {
+            this.showNotification('Error', 'Nombre y ruta son requeridos', 'error');
+            return;
+        }
+
+        const id = 'game_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+
+        let coverData = null;
+        let loadingImageData = null;
+
+        if (coverFile) {
+            coverData = await this.processImageFile(coverFile);
+        }
+
+        if (loadingImageFile) {
+            loadingImageData = await this.processImageFile(loadingImageFile);
+        }
+
+        if (!coverData && window.psboxAPI && psboxAPI.extractIcon) {
+            try {
+                coverData = await psboxAPI.extractIcon(path);
+            } catch (error) {
+                console.log('No se pudo extraer icono:', error);
+            }
+        }
+
+        const newGame = {
+            id: id,
+            name: name,
+            path: path,
+            cover: coverData,
+            loadingImage: loadingImageData,
+            added: new Date().toISOString()
+        };
+
+        this.games.push(newGame);
+        this.totalCarouselItems = 2 + this.games.length;
+        await this.saveConfig();
+
+        this.setupCarousel();
+        this.renderCarousel();
+
+        this.currentCenterIndex = this.games.length + 1;
+        this.updateCarouselPositions();
+
+        this.closeAddGameModal();
+        this.showNotification('Éxito', `${name} agregado correctamente`, 'success');
+        // 🔥 Forzar actualización correcta del carrusel
+        this.totalCarouselItems = 2 + this.games.length;
+
+        // Si el índice actual quedó fuera de rango, corregirlo
+        if (this.currentCenterIndex >= this.totalCarouselItems) {
+            this.currentCenterIndex = this.totalCarouselItems - 1;
+        }
+
+        // 🔥 Volver a renderizar todo
+        this.renderCarousel();
+
+        // 🔥 Guardar config
+        this.saveConfig();
+        this.totalCarouselItems = 2 + this.games.length;
+
+        // Opcional: enfocar el nuevo juego
+        this.currentCenterIndex = this.totalCarouselItems - 1;
+
+        this.renderCarousel();
+        this.saveConfig();
+
+    }
+
+    processImageFile(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+    // ===== CONFIGURACIÓN =====
+    updateControlModeText() {
+        const controlModeText = document.getElementById('controlModeText');
+        controlModeText.textContent = this.controlMode === 'gamepad'
+            ? 'Cambiar a Teclado/Ratón'
+            : 'Cambiar a Mando';
+    }
+
+    toggleControlMode() {
+        if (this.controlMode === 'gamepad') {
+            this.setKeyboardMode();
+            this.showNotification('Modo cambiado', 'Ahora usando Teclado/Ratón', 'info');
+        } else {
+            this.setGamepadMode();
+            this.showNotification('Modo cambiado', 'Ahora usando Mando', 'info');
+        }
+
+        this.updateControlModeText();
+        this.saveConfig();
+    }
+
+    changeControlMode() {
+        this.toggleControlMode();
+        this.closeConfigModal();
+    }
+
+    updateControlModeIndicator() {
+        const indicator = document.getElementById('controlMode');
+        indicator.className = 'control-mode ' + this.controlMode;
+        indicator.querySelector('.mode-icon').textContent =
+            this.controlMode === 'gamepad' ? '🎮' : '⌨️';
+        indicator.querySelector('span:last-child').textContent =
+            `Modo: ${this.controlMode === 'gamepad' ? 'Mando' : 'Teclado/Ratón'}`;
+    }
+
+    setupControlEvents() {
+        if (this.keyboardHandler) {
+            document.removeEventListener('keydown', this.keyboardHandler);
+        }
+
+        if (this.controlMode === 'gamepad') {
+            this.disableKeyboardNavigation();
+        } else {
+            this.setupKeyboardEvents();
+        }
+    }
+
+    setupKeyboardEvents() {
+        this.keyboardHandler = (e) => {
+            if (this.isInModal || this.isLoading) return;
+
+            switch (e.key) {
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    this.navigateLeft();
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    this.navigateRight();
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    this.navigateUp();
+                    break;
+                case 'ArrowDown':
+                    e.preventDefault();
+                    this.navigateDown();
+                    break;
+                case 'Enter':
+                    e.preventDefault();
+                    this.performAction();
+                    break;
+                case 'Escape':
+                    e.preventDefault();
+                    if (this.isQuickMenuOpen) {
+                        this.closeQuickMenu();
+                    } else if (this.isInModal) {
+                        this.closeCurrentModal();
+                    }
+                    break;
+                case 'Insert':
+                    e.preventDefault();
+                    this.openAddGameModal();
+                    break;
+                case 'Delete':
+                    e.preventDefault();
+                    this.removeSelectedGame();
+                    break;
+            }
+        };
+
+        document.addEventListener('keydown', this.keyboardHandler);
+    }
+
+    disableKeyboardNavigation() {
+        // Gamepad activo
+    }
+
+    disconnectController() {
+        this.showNotification('Mando', 'Apaga o desconecta el mando físicamente', 'info');
+    }
+
+    async shutdownPSBOX() {
+        // En lugar de mostrar confirmación, cerrar directamente
+        this.closePSBOX();
+    }
+
+    showAbout() {
+        alert(`PSBOX v1.0\nInterfaz estilo PlayStation 4 para Windows\n\nCaracterísticas:\n• Navegación con mando/teclado\n• Gestión de juegos\n• Pantalla de carga profesional\n• Quick Menu estilo PS4\n• Interfaz fiel al PS4 original`);
+    }
+    // ===== UTILIDADES =====
+    showNotification(title, message, type = 'info') {
+        const notification = document.getElementById('notification');
+        const icon = document.getElementById('notificationIcon');
+        const titleEl = document.getElementById('notificationTitle');
+        const messageEl = document.getElementById('notificationMessage');
+
+        notification.className = 'notification';
+        notification.classList.add(`notification-${type}`);
+
+        const icons = {
+            'success': '✅',
+            'error': '❌',
+            'warning': '⚠️',
+            'info': 'ℹ️'
+        };
+
+        icon.textContent = icons[type] || 'ℹ️';
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+
+        notification.classList.add('show');
+
+        setTimeout(() => {
+            notification.classList.remove('show');
+        }, 3000);
+    }
+
+    startSystemLoops() {
+        // Actualizaciones periódicas del sistema
+    }
+    // 🔥 AGREGAR AL FINAL DE LA CLASE PSBOXSystem
+    // Método de emergencia para restaurar manualmente
+    forceRestoreAfterGame() {
+        console.log('🚨 EJECUTANDO RESTAURACIÓN DE EMERGENCIA');
+
+        // 1. Forzar que todo sea visible
+        document.body.style.display = 'block';
+        document.body.style.opacity = '1';
+        document.body.style.visibility = 'visible';
+
+        // 2. Remover clase de fondo
+        document.body.classList.remove('background-mode');
+
+        // 3. Mostrar todos los elementos
+        document.querySelectorAll('*').forEach(el => {
+            el.style.visibility = 'visible';
+            el.style.opacity = '1';
+            el.style.display = '';
+        });
+
+        // 4. Forzar pantalla completa
+        this.enterFullscreen(true);
+
+        // 5. Notificación
+        this.showNotification(
+            'PSBOX Restaurado',
+            'La interfaz ha sido restaurada manualmente',
+            'success'
+        );
+
+        // 6. Resetear estado
+        this.currentRunningGame = null;
+        this.isMonitoringGame = false;
+
+        console.log('✅ Restauración de emergencia completada');
+    }
+
+    // 🔥 AGREGAR HOTKEY DE EMERGENCIA EN init()
+    // En el método init(), después de setupEmergencyHotkeys():
+    setupEmergencyHotkeys() {
+        document.addEventListener('keydown', (e) => {
+            // Ctrl + Alt + R = Restauración de emergencia
+            if (e.ctrlKey && e.altKey && e.key === 'R') {
+                e.preventDefault();
+                this.forceRestoreAfterGame();
+            }
+        });
+    }
+}
+// ===== INICIALIZAR SISTEMA =====
+let psboxSystem;
+
+window.onload = () => {
+    psboxSystem = new PSBOXSystem();
+    window.psboxSystem = psboxSystem;
+};
+
+// ===== FUNCIONES GLOBALES =====
+function navigateCarousel(direction) {
+    if (window.psboxSystem) {
+        psboxSystem.navigateCarousel(direction);
+    }
+}
+// 🔥 REEMPLAZA LA FUNCIÓN GLOBAL addNewGame() COMPLETAMENTE:
+function addNewGame() {
+    console.log('⚠️ addNewGame() global llamada - Redirigiendo a psboxSystem');
+
+    if (window.psboxSystem) {
+        // Usar el método del sistema, no función global duplicada
+        psboxSystem.handleAddNewGame();
+    } else {
+        console.error('❌ psboxSystem no disponible');
+    }
+}
+
+// 🔥 FUNCIONES GLOBALES PARA EDICIÓN
+function editBrowseForGame() {
+    if (window.psboxAPI && psboxAPI.showOpenDialog) {
+        psboxAPI.showOpenDialog({
+            filters: [
+                { name: 'Ejecutables', extensions: ['exe', 'lnk', 'bat', 'msi'] },
+                { name: 'Todos los archivos', extensions: ['*'] }
+            ],
+            properties: ['openFile']
+        }).then(result => {
+            if (!result.canceled && result.filePaths.length > 0) {
+                document.getElementById('editGamePath').value = result.filePaths[0];
+            }
+        });
+    } else {
+        document.getElementById('editGamePath').value = 'C:\\Juegos\\MiJuegoEditado.exe';
+    }
+}
+
+function editBrowseForCover() {
+    document.getElementById('editCoverFile').click();
+}
+
+function editBrowseForLoadingImage() {
+    document.getElementById('editLoadingImageFile').click();
+}
+
+async function saveEditedGame() {
+    if (!window.psboxSystem || !psboxSystem.currentEditingGame) return;
+
+    const name = document.getElementById('editGameName').value.trim();
+    const path = document.getElementById('editGamePath').value.trim();
+    const coverFile = document.getElementById('editCoverFile').files[0];
+    const loadingImageFile = document.getElementById('editLoadingImageFile').files[0];
+
+    if (!name || !path) {
+        psboxSystem.showNotification('Error', 'Nombre y ruta son requeridos', 'error');
+        return;
+    }
+
+    const game = psboxSystem.currentEditingGame;
+    const gameIndex = psboxSystem.games.findIndex(g => g.id === game.id);
+
+    if (gameIndex === -1) return;
+
+    // Actualizar datos del juego
+    game.name = name;
+    game.path = path;
+
+    if (coverFile) {
+        game.cover = await psboxSystem.processImageFile(coverFile);
+    }
+
+    if (loadingImageFile) {
+        game.loadingImage = await psboxSystem.processImageFile(loadingImageFile);
+    }
+
+    // Guardar cambios
+    await psboxSystem.saveConfig();
+    psboxSystem.renderCarousel();
+
+    // Cerrar modal
+    psboxSystem.closeEditGameModal();
+    psboxSystem.showNotification('Éxito', `${name} actualizado correctamente`, 'success');
+}
+
+function deleteCurrentGame() {
+    if (!window.psboxSystem || !psboxSystem.currentEditingGame) return;
+
+    const game = psboxSystem.currentEditingGame;
+    const gameIndex = psboxSystem.games.findIndex(g => g.id === game.id);
+
+    if (gameIndex === -1) return;
+
+    if (confirm(`¿Eliminar definitivamente "${game.name}"?`)) {
+        psboxSystem.games.splice(gameIndex, 1);
+        psboxSystem.totalCarouselItems = 2 + psboxSystem.games.length;
+
+        // Ajustar índice si es necesario
+        if (psboxSystem.currentCenterIndex >= psboxSystem.totalCarouselItems) {
+            psboxSystem.currentCenterIndex = psboxSystem.totalCarouselItems - 1;
+        }
+
+        psboxSystem.setupCarousel();
+        psboxSystem.renderCarousel();
+        psboxSystem.saveConfig();
+
+        psboxSystem.closeEditGameModal();
+        psboxSystem.showNotification('Eliminado', `${game.name} ha sido removido`, 'success');
+    }
+}
+
+function closeEditGameModal() {
+    if (window.psboxSystem) {
+        psboxSystem.closeEditGameModal();
+    }
+}
+
+function openAddGameModal() {
+    psboxSystem.openAddGameModal();
+}
+
+function closeAddGameModal() {
+    psboxSystem.closeAddGameModal();
+}
+
+function browseForGame() {
+    if (window.psboxAPI && psboxAPI.showOpenDialog) {
+        psboxAPI.showOpenDialog({
+            filters: [
+                { name: 'Ejecutables', extensions: ['exe', 'lnk', 'bat', 'msi'] },
+                { name: 'Todos los archivos', extensions: ['*'] }
+            ],
+            properties: ['openFile']
+        }).then(result => {
+            if (!result.canceled && result.filePaths.length > 0) {
+                document.getElementById('gamePath').value = result.filePaths[0];
+
+                const nameInput = document.getElementById('gameName');
+                if (!nameInput.value.trim()) {
+                    const fileName = result.filePaths[0].split('\\').pop().split('/').pop();
+                    const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "");
+                    nameInput.value = nameWithoutExt;
+                }
+            }
+        });
+    } else {
+        document.getElementById('gamePath').value = 'C:\\Juegos\\MiJuego.exe';
+        document.getElementById('gameName').value = 'Mi Juego';
+    }
+}
+
+function browseForCover() {
+    document.getElementById('coverFile').click();
+}
+
+function browseForLoadingImage() {
+    document.getElementById('loadingImageFile').click();
+}
+
+function addNewGame() {
+    psboxSystem.addNewGame();
+}
+
+function closeQuickMenu() {
+    psboxSystem.closeQuickMenu();
+}
+
+function toggleControlMode() {
+    psboxSystem.toggleControlMode();
+}
+
+function editSelectedGame() {
+    psboxSystem.editSelectedGame();
+}
+
+function removeSelectedGame() {
+    psboxSystem.removeSelectedGame();
+}
+
+function launchSelectedGame() {
+    psboxSystem.launchSelectedGame();
+}
+
+function disconnectController() {
+    psboxSystem.disconnectController();
+}
+
+function showPowerMenu() {
+    psboxSystem.shutdownPSBOX();
+}
+
+function cancelLoading() {
+    psboxSystem.cancelLoading();
+}
+
+function changeControlMode() {
+    psboxSystem.changeControlMode();
+}
+
+function closeConfigModal() {
+    psboxSystem.closeConfigModal();
+}
+
+function restorePSBOX() {
+    psboxSystem.restorePSBOXWindow();
+    psboxSystem.closeConfigModal();
+}
